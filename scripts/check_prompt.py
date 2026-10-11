@@ -63,9 +63,13 @@ REQUIRED_SECTIONS: list[tuple[str, list[str]]] = [
     ("12 汇报格式", ["汇报", "输出格式", "回复格式", "交付说明", "结果格式"]),
 ]
 
+#: 交付物/需求里的文件路径。白名单列常见产物，白名单外的扩展名走兜底（go / gif / xml / db…），
+#: 免得仅仅因为扩展名不在表里就误报 E8。
 PATH_RE = re.compile(
     r"[A-Za-z0-9_\-.\\/]+\.(?:md|py|js|mjs|cjs|ts|tsx|jsx|json|jsonc|txt|csv|tsv|html|css|scss|"
-    r"yml|yaml|toml|ini|sh|ps1|cmd|bat|sql|xlsx|docx|pptx|pdf|png|jpg|jpeg|svg|webp|exe|zip|log|env)",
+    r"yml|yaml|toml|ini|sh|ps1|cmd|bat|sql|xlsx|docx|pptx|pdf|png|jpg|jpeg|svg|webp|exe|zip|log|env|"
+    r"c|h|r|m|o|a|7z|"
+    r"[A-Za-z][A-Za-z0-9]{1,7})",
     re.IGNORECASE,
 )
 NUMBER_RE = re.compile(r"\d")
@@ -97,6 +101,58 @@ def normalize_heading(raw: str) -> str:
     return text.replace(" ", "").replace("\u3000", "").replace("：", "").replace(":", "")
 
 
+#: 别名前面紧跟「非 / 不」时不算命中：「非目标」是第 5 段，不是第 1 段里的「目标」。
+NEGATION_CHARS = "非不无"
+
+#: `判定：` 的三种取值（AGENTS.md 第 4 节）：命令 / 阈值 / 人工，三选一。
+JUDGE_KINDS = ("命令", "阈值", "人工")
+
+#: 段落里只写这些词（可带标点或括号）等于没写。
+EMPTY_CLAIMS = {"", "无", "没有", "none", "n/a", "不适用", "暂无", "略"}
+
+
+def alias_hit(title: str, aliases: list[str]) -> bool:
+    """标题是否命中别名；被「非/不」否定掉的不算（「非目标」不等于「目标」）。"""
+    for alias in aliases:
+        at = title.find(alias)
+        while at != -1:
+            if at == 0 or title[at - 1] not in NEGATION_CHARS:
+                return True
+            at = title.find(alias, at + 1)
+    return False
+
+
+def judge_kind(text: str) -> str | None:
+    """返回条目里第一处「判定」之后写的三态取值；一种都没写就返回 None。"""
+    at = text.find("判定")
+    if at == -1:
+        return None
+    tail = text[at:]
+    return next((kind for kind in JUDGE_KINDS if kind in tail), None)
+
+
+def is_empty_claim(text: str) -> bool:
+    """段落是否为空或只写了「无」（容忍「无。」「（无）」这类标点/括号写法）。"""
+    cleaned = re.sub(r"[\s。，,、；;：:！!？?\-—~～*•·]+", "", strip_emphasis(text))
+    return cleaned.strip("（）()【】[]<>「」").lower() in EMPTY_CLAIMS
+
+
+def fence_lines(lines: list[str]) -> list[bool]:
+    """标记每行是否在 ``` / ~~~ 围栏内 —— 围栏里的 `#` 是注释，不是标题。"""
+    flags: list[bool] = []
+    fence: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if fence is None and stripped.startswith(("```", "~~~")):
+            fence = stripped[:3]
+        elif fence is not None and stripped.startswith(fence):
+            fence = None
+            flags.append(False)
+            continue
+        flags.append(fence is not None)
+    return flags
+
+
 def read_text(path: Path) -> str:
     for enc in ("utf-8-sig", "utf-8", "gbk"):
         try:
@@ -109,7 +165,10 @@ def read_text(path: Path) -> str:
 def split_sections(lines: list[str]) -> tuple[list[tuple[str, int, int]], list[str]]:
     """返回 ([(归一化标题, 起始行号, 结束行号)], 无标题前的前言行)。"""
     headings: list[tuple[str, int]] = []
+    fenced = fence_lines(lines)
     for idx, line in enumerate(lines):
+        if fenced[idx]:
+            continue
         if HEADING_RE.match(line):
             headings.append((normalize_heading(line), idx))
     sections: list[tuple[str, int, int]] = []
@@ -136,6 +195,7 @@ def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], 
     返回 ({编号: 条目正文行}, [(编号, 行号), ...] 重复编号)。条目块在遇到下一条目或下一个标题时结束。
     """
     starts: list[tuple[int, int]] = []
+    fenced = fence_lines(lines)
     for idx, line in enumerate(lines):
         num = item_start(line, letter)
         if num is not None:
@@ -151,7 +211,7 @@ def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], 
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
         block: list[str] = []
         for j in range(idx, end):
-            if j != idx and HEADING_RE.match(lines[j]):
+            if j != idx and not fenced[j] and HEADING_RE.match(lines[j]):
                 break
             block.append(lines[j])
         items.setdefault(num, []).extend(block)
@@ -178,7 +238,7 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
                 continue
             if label.startswith("4 ") and ("非目标" in title or "验收" in title):
                 continue
-            if any(alias in title for alias in aliases):
+            if alias_hit(title, aliases):
                 hit = i
                 break
         if hit is None:
@@ -211,9 +271,9 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
         if not refs:
             findings.append(Finding("ERROR", "E4", f"验收 A{num} 没有引用任何需求编号（应写「对应 R1」）"))
         referenced |= refs
-        if "判定" not in text:
+        if judge_kind(text) is None:
             findings.append(
-                Finding("ERROR", "E5", f"验收 A{num} 没有 `判定：`（需写 命令 / 阈值 / 人工 三者之一）")
+                Finding("ERROR", "E5", f"验收 A{num} 没有 `判定：`，或没写判定方式（命令 / 阈值 / 人工 三者之一）")
             )
     for num in sorted(set(requirements) - referenced):
         findings.append(Finding("ERROR", "E6", f"需求 R{num} 没有任何验收条目覆盖它"))
@@ -223,8 +283,7 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
     if goal_label in matched:
         start, end = matched[goal_label]
         body = body_of(lines, start, end)
-        stripped = strip_emphasis(body).strip()
-        if not stripped or stripped in {"无", "没有", "none", "None", "N/A", "不适用"}:
+        if is_empty_claim(body):
             findings.append(Finding("ERROR", "E7", "非目标段落为空或只写了「无」；至少写 1 条不做的事"))
         elif len([ln for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("|")]) < 2 \
                 and len([ln for ln in body.splitlines() if ln.strip()]) < 2:
@@ -282,8 +341,7 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
     assume_label = "10 假设与开放问题"
     if assume_label in matched:
         start, end = matched[assume_label]
-        stripped = strip_emphasis(body_of(lines, start, end)).strip()
-        if not stripped or stripped in {"无", "没有", "none", "None"}:
+        if is_empty_claim(body_of(lines, start, end)):
             findings.append(Finding("WARN", "W3", "假设段为空；一条假设都没有，通常说明替用户拍板了"))
 
     return findings, len(raw)
