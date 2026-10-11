@@ -173,5 +173,3 @@ prompt-forge 的价值在于**流程约束**：先问、给参考、验证、留
 ## 协议
 
 [MIT](LICENSE) © 2026 hwy-miaomiao
-
-仓库形态与「一切判断落成可测量数字」的做法，沿用同作者的 [promo-forge](https://github.com/hwy-miaomiao/promo-forge)。
