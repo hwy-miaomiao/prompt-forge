@@ -70,9 +70,9 @@ cd prompt-forge
 
 ```bash
 python scripts/check_prompt.py --selftest
-# PASS  例1-下载文件夹整理.prompt.md: 0 ERROR
-# PASS  例2-班级报名网站.prompt.md: 0 ERROR
-# PASS  反例-模糊需求.prompt.md: 16 ERROR
+# PASS  例1-下载文件夹整理.prompt.md: 0 ERROR（期望 0 ERROR）
+# PASS  例2-班级报名网站.prompt.md: 0 ERROR（期望 0 ERROR）
+# PASS  反例-模糊需求.prompt.md: 16 ERROR（期望 >=5 ERROR）
 ```
 
 ## 你会得到什么
@@ -116,9 +116,13 @@ Q3. 交付形态（影响：交付物段落 + 验收段落）
 python scripts/check_prompt.py 输出/<slug>/prompt.md
 ```
 
-拦住 11 类结构问题（缺段落、需求/验收条数不足、验收没引用需求、验收没有判定方式、
+拦住 13 类结构问题（缺段落、需求/验收条数不足、编号重复、验收没引用需求、验收没有判定方式、
 需求没被验收覆盖、非目标写成"无"、交付物没路径、需求段出现模糊词、残留占位符……），
 全部检查项与修法见 [`references/校验清单.md`](references/校验清单.md)。
+
+- **ERROR 共 13 个码**（`E0`~`E10`，其中编号重复另算 `E2b` / `E3b`）；
+- **WARN 另有 8 个码**（`W1`~`W7`、`W9`）：全文过短、需求没有可验证对象、假设段为空、
+  需求/验收条目过多、非目标只写 1 条、一句多需求、非需求段出现模糊词。
 
 **0 ERROR 才允许交付**；WARN 要逐条说明为什么不影响执行。
 机器只管结构，需求对不对仍然要靠问询与人工复核 —— 闸门是拦低级错误的，不是质量保证。

@@ -42,6 +42,10 @@ VAGUE_WORDS = [
     "好看", "美观", "大气", "高级感", "有质感", "流畅", "秒开", "高性能", "稳定可靠",
     "易用", "好用", "友好", "方便", "简洁", "清爽", "合理", "完善", "丰富", "强大", "灵活", "优雅",
     "优化一下", "改进一下", "处理一下", "基本可以", "用户体验好", "效果好", "感觉",
+    # 下面这批在 references/模糊词换算表.md 里一直是「必须换算」的条目，但脚本原先没查：
+    # 表里写「快 / 快点 / 尽快」「稳定 / 可靠」「兼容 / 支持多平台」「安全」都要求换算，
+    # 脚本却只认「尽快」「稳定可靠」，于是这些词靠自觉。补进来让表与闸门共用一份判据。
+    "快点", "简单点", "不卡", "稳定", "可靠", "支持多平台", "兼容", "快", "安全",
 ]
 
 #: 占位符：任何段落里出现都是 ERROR。
@@ -184,9 +188,39 @@ def body_of(lines: list[str], start: int, end: int) -> str:
 
 
 def item_start(text: str, letter: str) -> int | None:
-    probe = ITEM_STRIP_RE.sub("", text.strip()).lstrip("*`").lstrip()
+    # 引用块写法 `> **R1** …` 与列表写法 `- **R1** …` 都要认出来：条目本身是什么形式
+    # 不影响编号的收集，把 `>` 和 `*` 一起剥掉再找编号。
+    probe = ITEM_STRIP_RE.sub("", text.strip()).lstrip(">*`").lstrip()
     match = re.match(rf"{letter}(\d+)(?!\d)", probe)
     return int(match.group(1)) if match else None
+
+
+def _strip_cited(text: str) -> str:
+    """剥掉行首 `>` 与「…」引号内容，剩下还有字才算作者自己的话。
+
+    口径与 `references/校验清单.md` 的「E9 / W9 的豁免口径」一行一致：`> [用户原话]「要好看」`
+    不算，但 `> **R1** 界面要美观` 仍会被抓 —— 加个 `>` 绕不过闸门。注意引号豁免对正文行同样
+    生效（`- 触发条件：用户提出「顺便删掉重复文件」→ …` 里的「顺便」是引文，不算作者的模糊词）。
+    """
+    line = text.strip()
+    if line.startswith(">"):
+        line = line[1:].strip()
+    return re.sub(r"「[^」]*」", "", line).strip()
+
+
+def item_body(text: str) -> str:
+    """条目块去掉开头那截标记（`- **R9** `、`> - **A1（对应 R1、R7）**：`）之后的正文。
+
+    W2 问的是「这条需求有没有数字 / 路径 / 具体对象」，而标记里的编号本身就是数字：直接拿整块
+    去搜 `\\d` 会恒命中，规则永远报不出来（实测 `- **R9** 界面要美观好看` 不报 W2）。
+    """
+    probe = text.strip()
+    probe = re.sub(r"^(?:[-*+>|]\s*)+", "", probe)  # 列表 / 引用 / 表格符号
+    probe = re.sub(r"^\*+", "", probe)  # `**R9**` 的前半个星号
+    probe = re.sub(r"^[RA]\d+", "", probe)  # 编号本身
+    probe = re.sub(r"^\*+", "", probe)  # 收尾星号
+    probe = re.sub(r"^[（(][^）)]*[）)]", "", probe)  # （对应 R1、R7）
+    return probe.lstrip("：: \t")
 
 
 def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], list[tuple[int, int]]]:
@@ -301,15 +335,18 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
         _flag_vague(findings, "交付物", body, start, "WARN")
 
     # ---- E9 模糊词 ---------------------------------------------------------
+    # 用段落的实际行号区间做去重键：标题字数由使用者决定（`## 4. 需求（R#）` 或 `## 需求（R#）` 都合法），
+    # 拿 label 字符串比对会在不编号的标题上失配，同一段就会被 E9 和 W9 各报一次。
+    checked: set[tuple[int, int]] = set()
     for label in ("4 需求（R#）", "7 验收标准（A#）"):
         if label in matched:
             start, end = matched[label]
+            checked.add((start, end))
             _flag_vague(findings, label.split(" ", 1)[1], body_of(lines, start, end), start, "ERROR")
 
-    covered = set(matched.values())
     for i, (title, start, end) in enumerate(sections):
-        if (start, end) in covered:
-            continue
+        if (start, end) in checked:
+            continue  # 这两段已由 E9 按 ERROR 查过，不要再报一遍 W9
         _flag_vague(findings, title, body_of(lines, start, end), start, "WARN")
 
     # ---- E10 占位符 --------------------------------------------------------
@@ -329,9 +366,19 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
 
     for num, block in sorted(requirements.items()):
         text = "\n".join(block)
-        if not NUMBER_RE.search(text) and not PATH_RE.search(text) and "`" not in text:
-            findings.append(Finding("WARN", "W2", f"需求 R{num} 没有任何数字/路径/具体对象，可能不可验证"))
-        joined = CODE_SPAN_RE.sub("", text)
+        # 只看标记（`- **R9**`）之后的正文：标记里的编号是数字，会骗过下面的 NUMBER_RE。
+        body = item_body(text)
+        # 代码段（`openpyxl`）本身就是「具体对象」，所以有代码段时照样豁免。
+        joined = CODE_SPAN_RE.sub("", body)
+        if not NUMBER_RE.search(joined) and not PATH_RE.search(joined) and "`" not in body:
+            findings.append(
+                Finding(
+                    "WARN",
+                    "W2",
+                    f"需求 R{num} 没有任何数字/路径/具体对象，可能不可验证"
+                    "（量化写在配对的 A# 里时可以忽略本条）",
+                )
+            )
         # 只抓「A，并且 B」这种并列句式；「三类：…、以及 …」是列举，「42 人同时提交」是场景，都不算。
         for word in ("并且", "以及", "同时"):
             if re.search(r"[，,]\s*" + word, joined):
@@ -350,10 +397,13 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
 def _flag_vague(findings: list[Finding], label: str, body: str, start: int, level: str) -> None:
     clean = CODE_SPAN_RE.sub("", body)
     for idx, line in enumerate(clean.splitlines()):
-        if line.strip().startswith(">") or line.strip().startswith("#"):
-            continue
+        if line.strip().startswith("#"):
+            continue  # 标题行是段落名本身，不算内容
+        probe = _strip_cited(line)
+        if not probe:
+            continue  # 空行，或整行都是引文（`> [用户原话]「…」`）：引用原文里的词不算你的锅
         for word in VAGUE_WORDS:
-            if word in line:
+            if word in probe:
                 findings.append(
                     Finding(level, "E9" if level == "ERROR" else "W9",
                             f"「{label}」段出现模糊词「{word}」，需换算成数字/路径/判定方式", start + idx + 2)
