@@ -38,6 +38,7 @@ _setup_stdout()
 VAGUE_WORDS = [
     "尽量", "尽快", "尽可能", "最好能", "适当", "差不多", "大概", "一些", "若干", "大量",
     "等等", "之类的", "类似的", "相关的", "看着办", "稍微", "有点", "顺便",
+    "在可行范围内", "如需要", "必要时", "视情况", "视需要",
     "好看", "美观", "大气", "高级感", "有质感", "流畅", "秒开", "高性能", "稳定可靠",
     "易用", "好用", "友好", "方便", "简洁", "清爽", "合理", "完善", "丰富", "强大", "灵活", "优雅",
     "优化一下", "改进一下", "处理一下", "基本可以", "用户体验好", "效果好", "感觉",
@@ -271,6 +272,12 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
         text = "\n".join(block)
         if not NUMBER_RE.search(text) and not PATH_RE.search(text) and "`" not in text:
             findings.append(Finding("WARN", "W2", f"需求 R{num} 没有任何数字/路径/具体对象，可能不可验证"))
+        joined = CODE_SPAN_RE.sub("", text)
+        # 只抓「A，并且 B」这种并列句式；「三类：…、以及 …」是列举，「42 人同时提交」是场景，都不算。
+        for word in ("并且", "以及", "同时"):
+            if re.search(r"[，,]\s*" + word, joined):
+                findings.append(Finding("WARN", "W7", f"需求 R{num} 里出现「，{word}」，可能是一句多需求，考虑拆成两条"))
+                break
 
     assume_label = "10 假设与开放问题"
     if assume_label in matched:
