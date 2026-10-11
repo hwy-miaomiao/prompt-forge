@@ -1,0 +1,25 @@
+# 生成的长提示词（克隆用法下的产物）
+输出/*
+!输出/.gitkeep
+
+# 用户工作区里的产物目录（Skill 用法）
+提示词/
+
+# 杂项
+.review-tmp/
+.tmp/
+.refs/
+
+# 密钥
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
