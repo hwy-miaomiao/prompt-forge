@@ -129,23 +129,32 @@ def item_start(text: str, letter: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def collect_items(lines: list[str], letter: str) -> dict[int, list[str]]:
-    """扫全文收集 `R1` / `A2` 开头的条目，返回 {编号: 该条目的正文行}。"""
+def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], list[tuple[int, int]]]:
+    """扫全文收集 `R1` / `A2` 开头的条目。
+
+    返回 ({编号: 条目正文行}, [(编号, 行号), ...] 重复编号)。条目块在遇到下一条目或下一个标题时结束。
+    """
     starts: list[tuple[int, int]] = []
     for idx, line in enumerate(lines):
         num = item_start(line, letter)
         if num is not None:
             starts.append((idx, num))
+
     items: dict[int, list[str]] = {}
+    seen: dict[int, int] = {}
+    duplicates: list[tuple[int, int]] = []
     for i, (idx, num) in enumerate(starts):
+        seen[num] = seen.get(num, 0) + 1
+        if seen[num] == 2:
+            duplicates.append((num, idx + 1))
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
         block: list[str] = []
-        for line in lines[idx:end]:
-            if line is not lines[idx] and HEADING_RE.match(line):
+        for j in range(idx, end):
+            if j != idx and HEADING_RE.match(lines[j]):
                 break
-            block.append(line)
+            block.append(lines[j])
         items.setdefault(num, []).extend(block)
-    return items
+    return items, duplicates
 
 
 def check_file(path: Path) -> tuple[list[Finding], int]:
@@ -178,17 +187,18 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
             matched[label] = (sections[hit][1], sections[hit][2])
 
     # ---- R# 需求 -----------------------------------------------------------
-    requirements = collect_items(lines, "R")
+    requirements, dup_r = collect_items(lines, "R")
     if len(requirements) < 3:
         findings.append(
             Finding("ERROR", "E2", f"编号需求不足：找到 {len(requirements)} 条 R#，至少 3 条（形如 `R1 ...`）")
         )
-    for num, block in requirements.items():
-        if len(block) > 1 and item_start(block[0], "R") is None:
-            findings.append(Finding("ERROR", "E2b", f"需求 R{num} 的条目行格式不对"))
+    for num, line_no in dup_r:
+        findings.append(Finding("ERROR", "E2b", f"需求编号 R{num} 重复出现（编号必须唯一）", line_no))
 
     # ---- A# 验收 -----------------------------------------------------------
-    acceptances = collect_items(lines, "A")
+    acceptances, dup_a = collect_items(lines, "A")
+    for num, line_no in dup_a:
+        findings.append(Finding("ERROR", "E3b", f"验收编号 A{num} 重复出现（编号必须唯一）", line_no))
     if len(acceptances) < 3:
         findings.append(
             Finding("ERROR", "E3", f"编号验收不足：找到 {len(acceptances)} 条 A#，至少 3 条（形如 `A1（对应 R1）...`）")
