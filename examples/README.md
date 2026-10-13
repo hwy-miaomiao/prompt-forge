@@ -15,10 +15,27 @@ python scripts/check_prompt.py --selftest
 # PASS  例1-下载文件夹整理.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  例2-班级报名网站.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  反例-模糊需求.prompt.md: 16 ERROR（期望 >=5 ERROR）
+# PASS  templates/提示词骨架.md: 0 ERROR, 0 WARN（期望 0 ERROR 0 WARN）
 ```
 
 自测扫的是 `examples/*.prompt.md` 全部三个文件：名字里带「反例」的按 **≥5 ERROR** 判，
-其余按 **0 ERROR** 判；判据硬编码在 `scripts/check_prompt.py` 的 `selftest()` 里。
+其余按 **0 ERROR** 判；另外把仓库自带的 `templates/提示词骨架.md` 也单列成一个用例
+（要求 **0 ERROR 0 WARN** —— 给人抄的模板自己必须先干净）；
+判据硬编码在 `scripts/check_prompt.py` 的 `selftest()` 里。
+
+## 还有一组：`examples/技能定义/`（闸门②的夹具）
+
+上面三个文件验的是**长提示词**；[`技能定义/`](技能定义/README.md) 验的是**这个技能自己的定义**
+能不能被宿主自动识别 —— 名字合不合规、描述里有没有"何时该用 / 何时不该用"、
+薄包装有没有把同目录的规范一起带上。9 个目录（1 正 8 反）+ 每个的预期 ERROR/WARN 码见
+[`技能定义/README.md`](技能定义/README.md)。
+
+```bash
+python scripts/check_skill.py --selftest
+# PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
+# PASS  [示例] good-minimal: ERROR [] WARN []（期望 ERROR [] WARN []）
+# ... 其余 8 个反例逐个 PASS，最后 `自测结果：全部通过`
+```
 
 ---
 
@@ -68,7 +85,8 @@ python scripts/check_prompt.py --selftest
    第 11 段设了"要收集更多个人信息必须停下来问人"的卡点 —— 这是用户没说、但必须写清楚的部分。
 
 跑闸门时 `例2` 会命中 1 条 WARN（`W2 需求 R2`）：R2 的量化写在配对的 `A2` 里（命令 + 期望行数），
-需求行本身没有数字，而 `W2` 只看需求行。这是设计内的提示 —— 正例的判据是 **0 ERROR**
+需求行本身没有数字（`W2` 看的是整条 `R#` 条目，含它的续行，但不拿配对的 `A#` 来判）。
+这是设计内的提示 —— 正例的判据是 **0 ERROR**
 （WARN 逐条说明即可，见 `references/校验清单.md`），`--selftest` 也只看 ERROR 数。
 
 ---
@@ -84,6 +102,6 @@ python scripts/check_prompt.py --selftest
 | 需求不可验收（E2/E3/E4/E5） | 只有 2 条需求、1 条验收，且验收既没引用需求也没有判定方式 |
 | 需求没被验收覆盖（E6×2） | R1、R2 都没有对应的 `A#`（同一段里 A1 也没引用它们） |
 | 交付物没路径（E8） | 写的是「放在合适的位置就行」 |
-| 模糊词（E9） | 好看、方便、性能好、看着办 —— 出现在需求段 |
+| 模糊词（W9×2） | 好看、看着办 —— 出现在一级标题段「帮我做个网站」（第 3、4 行）；「方便」被「每行只报第一个词」的规则吞掉、「性能好」不在模糊词表里，两者都没出现在输出里 |
 
 同一份需求，走完本仓库的流程后就是 `例2`。**两者不是"字数差别"，是"能不能验收的差别"。**
