@@ -311,6 +311,22 @@ python scripts/mutate_checks.py     # 动了闸门源码就要跑：15 处变异
 自测就会变成"永远通过"的摆设；再把这道新检查的关键一行加进 `scripts/mutate_checks.py` 的 `MUTATIONS`，
 这样"自测被改瞎"本身也会红。上面这几条 CI 都会替你跑一遍（Python 3.9 与 3.12 两头）。
 
+**本机只有 3.12 时**，别指望本机全绿就等于 3.9 也能跑 —— 这里真踩过一次：
+`Path.write_text(newline="\n")` 是 3.10+ 的参数，本机全绿、CI 的 3.9 那一格却红（`references/踩坑记录.md` #42）。
+自查不用装 Python：解压官方嵌入式包就能跑（脚本零依赖，8.6 MB）：
+
+```bash
+curl -LO https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip
+unzip -q python-3.9.13-embed-amd64.zip -d py39
+./py39/python -X utf8 -B scripts/check_prompt.py --selftest
+./py39/python -X utf8 -B scripts/check_skill.py --selftest
+./py39/python -X utf8 -B scripts/check_contract.py --selftest
+./py39/python -X utf8 -B scripts/mutate_checks.py
+```
+
+Windows PowerShell 上把最后四行换成
+`& .\py39\python.exe -X utf8 -B scripts\check_prompt.py --selftest`（其余同理）。
+
 ## 协议
 
 [MIT](LICENSE) © 2026 hwy-miaomiao

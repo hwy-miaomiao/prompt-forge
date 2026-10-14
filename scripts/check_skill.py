@@ -164,6 +164,17 @@ def read_text(path: Path) -> str:
         return path.read_text(encoding="gbk", errors="replace")
 
 
+def write_text_lf(path: Path, text: str) -> None:
+    """按 LF 写文件（本仓库约定全部文本都是 LF）。
+
+    不用 `Path.write_text(..., newline="\\n")`：那个 `newline` 参数是 **Python 3.10+** 才有的，
+    3.9 上会 `TypeError: write_text() got an unexpected keyword argument 'newline'`
+    —— 本仓库承诺 ≥3.9，CI 的 3.9 那一格真的抓到过（踩坑记录 #42），所以这里显式 `open`。
+    """
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+
+
 def split_lines(text: str) -> list[str]:
     """按编辑器口径切行：只认 `\\n`（顺带去掉 `\\r`）。
 
@@ -604,7 +615,7 @@ def selftest() -> int:
                 print(f"      ERROR: 自测用例 [{name}] 不可用：{exc}")
                 failed += 1
                 continue
-            path.write_text(text, encoding="utf-8", newline="\n")
+            write_text_lf(path, text)
             # 除了"只拷 SKILL.md"这个用例，其余都补上薄包装依赖的同目录文件
             if want != {"E7"}:
                 (skill_dir / "AGENTS.md").write_text("# 规范\n", encoding="utf-8")
@@ -628,7 +639,7 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         skill_dir = Path(tmp) / "prompt-forge"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(SELFTEST_FIXTURE, encoding="utf-8", newline="\n")
+        write_text_lf(skill_dir / "SKILL.md", SELFTEST_FIXTURE)
         (skill_dir / "AGENTS.md").write_text("# 规范\n", encoding="utf-8")
         (skill_dir / "references").mkdir()
         (skill_dir / "scripts").mkdir()
@@ -701,7 +712,7 @@ def selftest() -> int:
             "开始之前，先把上级目录的 `../AGENTS.md` 读一遍"
             f"（绝对路径写法也可以：`{root.as_posix()}/AGENTS.md`）。")
         path = skill_dir / "SKILL.md"
-        path.write_text(elsewhere, encoding="utf-8", newline="\n")
+        write_text_lf(path, elsewhere)
         findings, _ = check_skill(path)
         got = {f.code for f in findings}
         ok = not got
@@ -714,7 +725,7 @@ def selftest() -> int:
         # 反向：真·同目录引用（裸文件名）而文件不在，E7 必须照报
         bare_root = root / "bare-case" / "prompt-forge"
         bare_root.mkdir(parents=True)
-        (bare_root / "SKILL.md").write_text(SELFTEST_FIXTURE, encoding="utf-8", newline="\n")
+        write_text_lf(bare_root / "SKILL.md", SELFTEST_FIXTURE)
         findings, _ = check_skill(bare_root / "SKILL.md")
         got = {f.code for f in findings if f.level == "ERROR"}
         ok = got == {"E7"}
@@ -750,7 +761,7 @@ def selftest() -> int:
             "扩充菜单每一项都自带默认档；用户说「都可以」照默认走。",
         ]
         path = skill_dir / "SKILL.md"
-        path.write_text("\n".join(rows) + "\n", encoding="utf-8", newline="\n")
+        write_text_lf(path, "\n".join(rows) + "\n")
         findings, _ = check_skill(path)
         codes = {f.code for f in findings}
         w4 = [f for f in findings if f.code == "W4"]
@@ -774,7 +785,7 @@ def selftest() -> int:
             (skill_dir / "scripts").mkdir()
             (skill_dir / "scripts" / "check_prompt.py").write_text("", encoding="utf-8")
             path = skill_dir / "SKILL.md"
-            path.write_text(rows_text, encoding="utf-8", newline="\n")
+            write_text_lf(path, rows_text)
             findings, _ = check_skill(path)
         codes = {f.code for f in findings}
         hits = want_msg and any(want_msg in f.message for f in findings)
@@ -815,7 +826,7 @@ def selftest() -> int:
         (skill_dir / "references").mkdir()
         (skill_dir / "scripts").mkdir()
         (skill_dir / "scripts" / "check_prompt.py").write_text("", encoding="utf-8")
-        (skill_dir / "SKILL.md").write_text(SELFTEST_FIXTURE, encoding="utf-8", newline="\n")
+        write_text_lf(skill_dir / "SKILL.md", SELFTEST_FIXTURE)
         findings, _ = check_skill(skill_dir / "sub" / ".." / "SKILL.md")
         got = {f.code for f in findings if f.level == "ERROR"}
         ok = not got
