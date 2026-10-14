@@ -48,11 +48,14 @@ prompt-forge/
 ├── SKILL.md             # 安装成 Agent Skill 时的入口
 ├── CLAUDE.md            # 让 Claude Code 也读 AGENTS.md
 ├── README.md            # 给人看的说明
+├── .github/workflows/   # CI：三份自测 + 变异检验 + 自家资产实跑（见第 5 节）
 ├── references/          # 方法论：需求问询 / 提示词结构 / 参考样例库 / 模糊词换算表 / 校验清单 / 踩坑记录 / 方法论出处
 ├── templates/           # 提示词骨架、需求确认模板
 ├── scripts/
-│   ├── check_prompt.py  # 闸门①：检查长提示词本身是否符合 12 段契约
-│   └── check_skill.py   # 闸门②：检查本技能自己的定义（SKILL.md 能否被自动识别）
+│   ├── check_prompt.py   # 闸门①：检查长提示词本身是否符合 12 段契约
+│   ├── check_skill.py    # 闸门②：检查本技能自己的定义（SKILL.md 能否被自动识别）
+│   ├── check_contract.py # 闸门③：检查 12 段之间对不对得上（需求↔步骤、未确认↔停下条件、判定↔命令）
+│   └── mutate_checks.py  # 变异检验：把闸门源码改坏，自测必须变红（证明自测不是空跑）
 ├── examples/            # 闸门①的正反例（正例必须过闸门）
 │   └── 技能定义/         # 闸门②的正反例：1 正 8 反，预期 ERROR/WARN 码见该目录 README
 └── 输出/                # 克隆用法下的产物目录（git 忽略）
@@ -165,9 +168,17 @@ flowchart LR
 
 ```bash
 python scripts/check_prompt.py <输出目录>/prompt.md
+python scripts/check_contract.py <输出目录>/prompt.md
 ```
 
-- **必须 0 ERROR 才算通过**；WARN 要在交付回复里**逐条列出**，每条都写清为什么不影响执行（话术模板见 `references/校验清单.md` 第三节）。
+- **闸门① 与闸门③ 都必须 0 ERROR 才算通过**（闸门② 查的是本技能自己的定义，改了 `SKILL.md`、`AGENTS.md`
+  或 `references/` 之后单独跑）；WARN 要在交付回复里**逐条列出**，每条都写清为什么不影响执行（话术模板见 `references/校验清单.md` 第三节）。
+- 闸门① 查的是「这一段自己写得对不对」；闸门③ 查的是「段与段之间对不对得上」：第 4 段写下的 `R#`
+  有没有被第 9 段任何一步触及、第 10 段的每条 `未确认` 在第 11 段有没有对应的停下条件、
+  第 7 段写了 `判定：命令` 的条目里到底有没有一条能粘贴的命令。两者互补，只跑一个都不算过。
+- 确属「这条 WARN 在这个语境下不必改」时，可以在同一段里写豁免注释
+  `<!-- pf-ignore: W码 理由 -->`（只对 WARN 生效、必须写理由、写法错了报 E11；
+  `--no-ignore` 可以看被豁免的全部条目）。豁免不是橡皮：默认做法是改掉它。
 - 再过一遍 `references/校验清单.md` 的人工复核项，最要紧的是这三条：
   ① 把本次对话全部拿掉，另一个 AI 能不能只靠 `prompt.md` 读懂；
   ② 每条需求是不是都有验收；③ 有没有偷偷替用户拍板。
@@ -216,6 +227,11 @@ python scripts/check_prompt.py <输出目录>/prompt.md
 - `R#` / `A#` 编号在本文件内唯一、不复用；新增需求**追加编号**，不要重排（避免用户对不上号）。
 - `判定：` 只有三种取值 —— **命令**（贴命令 + 期望输出）、**阈值**（指标 + 数字 + 测量方法）、**人工**（谁看、看什么、什么算过）。
 - 全篇用**绝对路径或相对于仓库根的路径**，禁止「合适的位置」「相应目录」。
+- 第 9 段的每个步骤都要写清它对应哪条需求：`1. 读表 → 产物 out/borrow.csv（对应 R1）`。
+  每条 `R#` 至少被一个步骤提到 —— 漏掉的那条没人干（闸门③ 的 C2 查这条）；
+  这版真不做的，就挪进第 5 段非目标写明理由，别让它在步骤段里烂尾。
+- 第 10 段每条 `未确认` 都要在第 11 段有一条对应的停下条件（闸门③ 的 C3/C4 查这条）：
+  「用户答不上来的那件事」必须写明「什么情况下停下来问人」，否则执行的人只能自己拍板。
 - 阶段 2.5 的菜单勾选结果必须落到对应段落：勾「要性能预算」→ 第 6 段写数字、第 7 段写判定；
   勾「不要」→ 第 5 段非目标写明；没确认的 → 第 10 段标 `未确认`。
 
@@ -224,11 +240,18 @@ python scripts/check_prompt.py <输出目录>/prompt.md
 | 闸门 | 通过条件 |
 | --- | --- |
 | `check_prompt.py` | **0 ERROR**（WARN 可接受，但要逐条说明） |
-| `python scripts/check_prompt.py --selftest` | 正例 0 ERROR、反例 ≥5 ERROR、`templates/提示词骨架.md` 也是 **0 ERROR 0 WARN**（改了脚本 / 示例 / 模板必须重跑） |
+| `python scripts/check_prompt.py --selftest` | 正例 0 ERROR、反例 ≥5 ERROR、`templates/提示词骨架.md` 也是 **0 ERROR 0 WARN**；39 个用例全过（改了脚本 / 示例 / 模板必须重跑） |
 | `check_skill.py <SKILL.md>` | **0 ERROR**（检查本技能自己的定义：name 与目录名一致、description 能在 500 字内被自动识别、正文写了分诊与默认档；改 `SKILL.md` 后必须重跑） |
-| `python scripts/check_skill.py --selftest` | 仓库里真实的 `SKILL.md` 0 ERROR、每个反例用例报出的 ERROR 码与预期一致 |
+| `python scripts/check_skill.py --selftest` | 仓库里真实的 `SKILL.md` 0 ERROR、每个反例用例报出的 ERROR 码与预期一致；40 个用例全过 |
+| `check_contract.py` | **0 ERROR**（跨段一致性：C1 引用了不存在的编号、C3 未确认没人接、C2/C4/C5 是 WARN；段落齐不齐归闸门① 管） |
+| `python scripts/check_contract.py --selftest` | 10 个用例 + 1 个 `--no-ignore` 用例 + 2 个范围说明用例全过 |
+| `python scripts/mutate_checks.py` | 把闸门源码改坏 15 处，每一处都必须让对应的 `--selftest` 变红；基线必须先是绿的。自测空跑过一次（踩坑记录 #29），这一步就是防它再空跑 |
+| `python scripts/check_*.py <文件> --no-ignore` | 无视 `<!-- pf-ignore: W码 理由 -->` 豁免注释，把 WARN 全列出来（复核豁免得对不对时用） |
 
 脚本一律：**发现问题就非零退出并打印 `ERROR: ...` 行**，不要静默通过。
+以上几条在 `.github/workflows/ci.yml` 里跑（Python 3.9 / 3.12 两头都跑），另加两件仓库级的检查：
+自家资产（`examples/例1`、`examples/例2`、`templates/提示词骨架.md`、`SKILL.md`）必须过闸门、
+反例必须被拦下、仓库文本必须是 LF。
 
 ## 6. 参考文档
 
@@ -238,7 +261,7 @@ python scripts/check_prompt.py <输出目录>/prompt.md
 | `references/参考样例库.md` | 阶段 2 给用户选项时、阶段 2.5 给扩充菜单时（可直接抄的菜单与参照物） |
 | `references/提示词结构.md` | 阶段 3 动手写之前（12 段逐段写法与正反例） |
 | `references/模糊词换算表.md` | 阶段 3 撞到「快/好看/稳定」这类词时 |
-| `references/校验清单.md` | 阶段 4，以及交付前 |
+| `references/校验清单.md` | 阶段 4，以及交付前（三道闸门的码表与话术都在这儿） |
 | `references/踩坑记录.md` | 开工前通读一遍，别重复踩 |
 | `references/方法论出处.md` | 想知道「这条规矩是哪来的 / 哪些是本仓库自己的取舍」时（自动识别与菜单的出处在第 4.5 节；也是对外解释的依据） |
 
@@ -255,3 +278,7 @@ python scripts/check_prompt.py <输出目录>/prompt.md
 9. 不把扩充菜单做成「让用户配置一切」：每项必须自带默认档，用户不选就按默认走并在假设段标注。
 10. 不让被勾掉的项凭空消失：进不了提示词，就进第 5 段非目标或第 10 段假设。
 11. 改了 `SKILL.md` 的 `name` / `description` 却不重跑 `scripts/check_skill.py`。
+12. 不交付「某条需求没人干」的步骤段：第 9 段要么写 `（对应 R#）`，要么把那条需求挪进第 5 段非目标。
+13. 不把 `<!-- pf-ignore: W码 理由 -->` 当消警告的橡皮：豁免只对 WARN 生效、必须写理由，
+    而且被豁免的每一条都要在交付回复里说清为什么不影响执行。
+14. 改了闸门脚本（`scripts/*.py`）却不跑 `--selftest` 与 `python scripts/mutate_checks.py`。

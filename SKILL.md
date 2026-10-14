@@ -39,10 +39,13 @@ description: 当用户抛来一句话、半句话或「帮我做个 X」式的�
 3. 问完给一张**内容扩充菜单**（阶段 2.5：这份提示词要不要包含性能预算、错误处理、部署回滚……），
    **每一项都自带默认档**；用户说「全按默认 / 都可以 / 你决定」就照默认走，未确认项写进假设段。
    菜单是给选择，不是让用户配置一切。
-4. `python scripts/check_prompt.py <输出目录>/prompt.md` 必须 **0 ERROR** 才允许交付；
+4. `python scripts/check_prompt.py <输出目录>/prompt.md` 与 `python scripts/check_contract.py <输出目录>/prompt.md`
+   必须**都 0 ERROR** 才允许交付：前者查每一段自己写得对不对，后者查段与段之间对不对得上
+   （第 4 段的 `R#` 有没有人干、第 10 段的 `未确认` 有没有停下条件、`判定：命令` 里有没有命令）。
    交付时把长提示词**全文**放进回复里，而不是只说「已写入文件」。
    改动过本文件、`AGENTS.md` 或 `references/` 的话，另外跑 `python scripts/check_skill.py SKILL.md`
-   —— 它查的是这个技能自己还能不能被宿主自动识别（frontmatter 写错会让技能静默失效）。
+   —— 它查的是这个技能自己还能不能被宿主自动识别（frontmatter 写错会让技能静默失效）；
+   改动过任何闸门脚本（`scripts/*.py`）的话，三份 `--selftest` 与 `python scripts/mutate_checks.py` 都要重跑。
 
 > 本技能的自动触发是**模型侧的语义匹配**（宿主把 name + description 交给模型，模型自己判断该不该用），
 > 官方口径是"必要非充分"：描述匹配也可能不触发。所以宿主没自动接住时，用户直接说

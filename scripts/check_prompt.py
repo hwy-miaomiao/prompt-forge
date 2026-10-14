@@ -54,6 +54,33 @@ VAGUE_WORDS = [
 #: 占位符：任何段落里出现都是 ERROR。
 PLACEHOLDERS = ["TODO", "TBD", "待补充", "待填", "待定", "XXX", "???"]
 
+#: 豁免注释：`<!-- pf-ignore: W2 这版先不做量化 -->`。
+#: 只允许豁免 WARN —— ERROR 是「不改就不能交付」，给它开后门等于闸门失效。
+IGNORE_RE = re.compile(r"<!--\s*pf-ignore\s*[:：]\s*([^>\n]*?)\s*-->")
+IGNORE_CODES = tuple(f"W{i}" for i in range(1, 10))
+ERROR_CODES = ("E0", "E1", "E2", "E2b", "E3", "E3b", "E4", "E5", "E6", "E7", "E8", "E9", "E10")
+#: 理由至少几个字：写「误报」算说了，写「-」「ok」不算。
+IGNORE_REASON_MIN = 4
+
+
+def codes_hint(codes: tuple[str, ...]) -> str:
+    """把码表压成 `W1…W9、C1…C5` 这样的短提示。
+
+    闸门③ 会带着自己的 `C1…C5` 一起传进来（闸门① 只认 `W1…W9`），写全 14 个码
+    会把一行报错撑到没人读。
+    """
+    groups: list[tuple[str, int, int]] = []
+    for code in codes:
+        digits = re.sub(r"\D", "", code)
+        if not digits:
+            continue
+        letter, num = code[0], int(digits)
+        if groups and groups[-1][0] == letter:
+            groups[-1] = (letter, groups[-1][1], num)
+        else:
+            groups.append((letter, num, num))
+    return "、".join(f"{letter}{lo}…{letter}{hi}" for letter, lo, hi in groups)
+
 #: 12 段契约：段落名 -> 标题里出现任一关键词即算命中。
 REQUIRED_SECTIONS: list[tuple[str, list[str]]] = [
     ("1 角色与目标", ["目标", "角色"]),
@@ -119,6 +146,18 @@ class Finding:
 
 def strip_emphasis(text: str) -> str:
     return text.replace("**", "").replace("__", "").replace("`", "")
+
+
+def strip_comments(text: str) -> str:
+    """把 HTML 注释换成等量空行：注释是给人的元信息，不是正文。
+
+    为什么必须剥：`<!-- pf-ignore: W2 … -->` 里的 `W2` **带着数字**。注释紧跟在条目后面时
+    它就是这条需求的续行，`NUMBER_RE` 一看到那个 `2` 就认为「这条需求有数字、可验证」，
+    W2 于是静默消失 —— 豁免注释自己把要豁免的检查弄成了假绿（实测：`- **R3** 界面要顺手。`
+    加一行 `<!-- pf-ignore: W2 … -->` 之后 W2 既不报也不豁免，直接不见了）。
+    换成等量空行是为了保住行号：E9/W9 的报错行号要指向编辑器里那一行。
+    """
+    return re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
 
 
 def normalize_heading(raw: str) -> str:
@@ -194,8 +233,12 @@ def judge_kind(text: str) -> str | None:
 
 
 def is_empty_claim(text: str) -> bool:
-    """段落是否为空或只写了「无」（容忍「无。」「（无）」这类标点/括号写法）。"""
-    cleaned = re.sub(r"[\s。，,、；;：:！!？?\-—~～*•·]+", "", strip_emphasis(text))
+    """段落是否为空或只写了「无」（容忍「无。」「（无）」这类标点/括号写法）。
+
+    注释不算内容：`## 10 假设与开放问题` 下面只挂一行 `<!-- 等用户补 -->` 仍然是空段。
+    """
+    cleaned = re.sub(r"[\s。，,、；;：:！!？?\-—~～*•·]+", "",
+                     strip_emphasis(strip_comments(text)))
     return cleaned.strip("（）()【】[]<>「」").lower() in EMPTY_CLAIMS
 
 
@@ -289,6 +332,8 @@ def declared_refs(block: list[str], num: int) -> set[int]:
     引用在续行不算），撞出 1 个假 E4 + 2 个假 E6，直接卡在「0 ERROR 才允许交付」上。
     """
     refs: set[int] = set()
+    # 注释不是正文：`<!-- pf-ignore: W2 见 R9 -->` 不该被当成「这条 A# 声明了 R9」。
+    block = strip_comments("\n".join(block)).split("\n")
     for line in block:
         if item_start(line, "A") == num:
             refs |= {int(m) for m in re.findall(r"R(\d+)(?!\d)", line)}
@@ -350,7 +395,8 @@ def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], 
     return items, duplicates
 
 
-def check_file(path: Path) -> tuple[list[Finding], int]:
+def check_file(path: Path, use_ignore: bool = True,
+               suppressed: list[tuple[Finding, str]] | None = None) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
     raw = read_text(path)
     lines = raw.splitlines()
@@ -360,6 +406,11 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
     if not sections:
         findings.append(Finding("ERROR", "E0", "找不到任何 Markdown 标题；长提示词必须按 12 段分节"))
         return findings, len(raw)
+
+    #: 豁免注释：`<!-- pf-ignore: W2 理由 -->`。只对 WARN 生效，写法问题报 E11（见 parse_ignores）。
+    ignores, ignore_problems = parse_ignores(lines)
+    where = section_index(lines, sections)
+    findings.extend(ignore_problems)
 
     # ---- E1 必需段落 -------------------------------------------------------
     # 绑定必须**优先**选带编号的标题，否则文档标题会把段落抢走：
@@ -571,17 +622,33 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
                 break
 
     # ---- 其余警告 ----------------------------------------------------------
+    # 行号不是装饰：`pf-ignore` 的作用域按「注释与被豁免的 WARN 在同一段」判，
+    # 所以这几条也得说清自己在哪一段（拿段落标题行当锚点）。
+    def _item_line(letter: str, num: int) -> int:
+        for i, ln in enumerate(lines):
+            if not fenced[i] and item_start(ln, letter) == num:
+                return i + 1
+        return 0
+
+    def _section_line(label: str) -> int:
+        span = matched.get(label)
+        return span[0] + 1 if span else 0
+
     if len(raw) < 600:
         findings.append(Finding("WARN", "W1", f"全文只有 {len(raw)} 字符，信息量可能不足以让陌生 AI 开工"))
     if len(acceptances) > 25:
-        findings.append(Finding("WARN", "W4", f"验收条目 {len(acceptances)} 条偏多，考虑合并"))
+        findings.append(Finding("WARN", "W4", f"验收条目 {len(acceptances)} 条偏多，考虑合并",
+                                _section_line("7 验收标准（A#）")))
     if len(requirements) >= 15:
-        findings.append(Finding("WARN", "W5", f"需求条目 {len(requirements)} 条偏多，考虑分层（必须有 / 可选）"))
+        findings.append(Finding("WARN", "W5", f"需求条目 {len(requirements)} 条偏多，考虑分层（必须有 / 可选）",
+                                _section_line("4 需求（R#）")))
 
     for num, block in sorted(requirements.items()):
         text = "\n".join(block)
+        line_no = _item_line("R", num)
         # 只看标记（`- **R9**`）之后的正文：标记里的编号是数字，会骗过下面的 NUMBER_RE。
-        body = item_body(text)
+        # 注释也剥掉：`<!-- pf-ignore: W2 … -->` 里的 `2` 同样会骗过它（见 strip_comments）。
+        body = strip_comments(item_body(text))
         # 代码段（`openpyxl`）本身就是「具体对象」，所以有代码段时照样豁免。
         joined = CODE_SPAN_RE.sub("", body)
         if not NUMBER_RE.search(joined) and not PATH_RE.search(joined) and "`" not in body:
@@ -591,25 +658,33 @@ def check_file(path: Path) -> tuple[list[Finding], int]:
                     "W2",
                     f"需求 R{num} 没有任何数字/路径/具体对象，可能不可验证"
                     "（量化写在配对的 A# 里时可以忽略本条）",
+                    line_no,
                 )
             )
         # 只抓「A，并且 B」这种并列句式；「三类：…、以及 …」是列举，「42 人同时提交」是场景，都不算。
         for word in ("并且", "以及", "同时"):
             if re.search(r"[，,]\s*" + word, joined):
-                findings.append(Finding("WARN", "W7", f"需求 R{num} 里出现「，{word}」，可能是一句多需求，考虑拆成两条"))
+                findings.append(Finding("WARN", "W7", f"需求 R{num} 里出现「，{word}」，可能是一句多需求，考虑拆成两条",
+                                        line_no))
                 break
 
     assume_label = "10 假设与开放问题"
     if assume_label in matched:
         start, end = matched[assume_label]
         if is_empty_claim(body_of(lines, start, end)):
-            findings.append(Finding("WARN", "W3", "假设段为空；一条假设都没有，通常说明替用户拍板了"))
+            findings.append(Finding("WARN", "W3", "假设段为空；一条假设都没有，通常说明替用户拍板了",
+                                    start + 1))
+
+    if use_ignore and ignores:
+        findings, dropped = apply_ignores(findings, ignores, where)
+        if suppressed is not None:
+            suppressed.extend(dropped)
 
     return findings, len(raw)
 
 
 def _flag_vague(findings: list[Finding], label: str, body: str, start: int, level: str) -> None:
-    clean = CODE_SPAN_RE.sub("", body)
+    clean = CODE_SPAN_RE.sub("", strip_comments(body))
     for idx, line in enumerate(clean.splitlines()):
         if line.strip().startswith("#"):
             continue  # 标题行是段落名本身，不算内容
@@ -625,17 +700,115 @@ def _flag_vague(findings: list[Finding], label: str, body: str, start: int, leve
                 break
 
 
-def report(path: Path) -> int:
-    findings, size = check_file(path)
+def parse_ignores(lines: list[str], codes: tuple[str, ...] = IGNORE_CODES) -> tuple[list[tuple[int, str, str]], list[Finding]]:
+    """收集 `<!-- pf-ignore: W2 为什么这条可以忽略 -->`。
+
+    返回 `([(注释所在行的 0 基下标, 码, 理由)], [写法有问题的 Finding])`。
+    写法问题一律 ERROR（E11）：豁免是「我知道这条 WARN 在说什么、为什么它不影响执行」的声明，
+    不是关闸门的开关。所以缺码、缺理由、码不认识、或者想豁免 ERROR，都在这里被拦下。
+
+    `codes` 是「本闸门能豁免的码」：闸门① 只认自己的 `W1…W9`；闸门③ 传 `W1…W9 + C1…C5`，
+    这样 `<!-- pf-ignore: C2 … -->` 在闸门③ 里算数、在闸门① 里会老老实实报「不认识这个码」。
+    """
+    ignores: list[tuple[int, str, str]] = []
+    problems: list[Finding] = []
+    for idx, line in enumerate(lines):
+        for m in IGNORE_RE.finditer(line):
+            body = m.group(1).strip()
+            hit = re.match(r"^([A-Za-z]\d+[a-z]?)\s*(.*)$", body)
+            if not hit:
+                problems.append(
+                    Finding("ERROR", "E11",
+                            "`pf-ignore` 没写码（写法：`<!-- pf-ignore: W2 为什么这条可以忽略 -->`）",
+                            idx + 1)
+                )
+                continue
+            code = hit.group(1).upper()
+            reason = hit.group(2).strip()
+            if code in ERROR_CODES:
+                problems.append(
+                    Finding("ERROR", "E11",
+                            f"`pf-ignore: {code}` 无效：豁免只对 WARN 生效，{code} 是 ERROR，"
+                            "必须改掉才算过闸门", idx + 1)
+                )
+                continue
+            if code not in codes:
+                problems.append(
+                    Finding("ERROR", "E11",
+                            f"`pf-ignore: {code}` 不认识这个码（本闸门可豁免的只有 {codes_hint(codes)}）",
+                            idx + 1)
+                )
+                continue
+            if len(reason) < IGNORE_REASON_MIN:
+                problems.append(
+                    Finding("ERROR", "E11",
+                            f"`pf-ignore: {code}` 必须写理由（至少 {IGNORE_REASON_MIN} 个字）："
+                            "下一个人要靠它判断这是有意的取舍还是漏改", idx + 1)
+                )
+                continue
+            ignores.append((idx, code, reason))
+    return ignores, problems
+
+
+def section_index(lines: list[str], sections: list[tuple[str, int, int, int, bool]]) -> dict[int, str]:
+    """行号（0 基）-> 段落名。豁免注释的作用域判据：注释与被豁免的 WARN 得在同一段。"""
+    where: dict[int, str] = {}
+    for title, _level, start, end, _numbered in sections:
+        for idx in range(max(start, 0), min(end, len(lines))):
+            where.setdefault(idx, title)
+    return where
+
+
+def apply_ignores(
+    findings: list[Finding],
+    ignores: list[tuple[int, str, str]],
+    where: dict[int, str],
+) -> tuple[list[Finding], list[tuple[Finding, str]]]:
+    """按注释豁免 WARN，返回 `(留下的 findings, [(被豁免的 finding, 理由)])`。
+
+    作用域：注释与它要豁免的 WARN 在**同一段**里才算数（把 `pf-ignore: W2` 写在别处，
+    下一个人看到那条 WARN 时根本不知道有人处理过）。不带行号的检查（W1 全文长度）是文件级，
+    写在哪儿都算 —— 它说的就是整份文件。
+    """
+    kept: list[Finding] = []
+    dropped: list[tuple[Finding, str]] = []
+    for f in findings:
+        reason = None
+        if f.level == "WARN":
+            for idx, code, why in ignores:
+                if code != f.code:
+                    continue
+                if not f.line:
+                    reason = why
+                    break
+                here = where.get(f.line - 1)
+                if here is not None and here == where.get(idx):
+                    reason = why
+                    break
+        if reason is None:
+            kept.append(f)
+        else:
+            dropped.append((f, reason))
+    return kept, dropped
+
+
+def report(path: Path, use_ignore: bool = True) -> int:
+    suppressed: list[tuple[Finding, str]] = []
+    findings, size = check_file(path, use_ignore=use_ignore, suppressed=suppressed)
     errors = [f for f in findings if f.level == "ERROR"]
     warns = [f for f in findings if f.level == "WARN"]
     print(f"\n=== 检查 {path} （{size} 字符） ===")
     for f in sorted(findings, key=lambda x: (x.level != "ERROR", x.line)):
         print(f.render())
+    for f, why in suppressed:
+        print(f"豁免: {f.render()} —— 理由：{why}")
     if errors:
         print(f"结果：{len(errors)} ERROR, {len(warns)} WARN —— 未通过")
     else:
-        print(f"结果：0 ERROR, {len(warns)} WARN —— 通过" + ("（WARN 需逐条说明为什么不影响执行）" if warns else ""))
+        tail = "（WARN 需逐条说明为什么不影响执行）" if warns else ""
+        if suppressed:
+            tail = f"（另有 {len(suppressed)} 条 WARN 按 `pf-ignore` 注释豁免，`--no-ignore` 可看全）"
+        print(f"结果：0 ERROR, {len(warns)} WARN —— 通过" + tail)
     return 1 if errors else 0
 
 
@@ -678,7 +851,9 @@ python scripts/borrow.py
 期望输出：out/borrow.csv 生成，退出码 0。
 
 ## 9. 执行步骤
-1. 读表 → 产物 out/borrow.csv
+1. 读表并写出 out/borrow.csv（对应 R1）
+2. 末尾统一跳过空行（对应 R2）
+3. 入口收在 scripts/borrow.py，退出码固定 0/1（对应 R3）
 
 ## 10. 假设与开放问题
 - 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。
@@ -686,6 +861,7 @@ python scripts/borrow.py
 ## 11. 何时必须停下来问人
 - 工作表数量超过 1 个时，停下来问人再继续。
 - 需要新增第三方依赖时，停下来问人。
+- 表头不在第 1 行时，停下来问人再确认列名。
 
 ## 12. 汇报格式
 1. 改了什么（文件清单）
@@ -744,6 +920,9 @@ def selftest() -> int:
     clean_title = "# 任务：做一个借阅登记小工具"     # 中性标题：不带任何段落别名
     hijack_title = "# 任务：按下面的需求做一个图书借阅登记小工具"
     vague_line = "输出界面要美观，"
+    plain_r3 = "- **R3** 入口是 scripts/borrow.py，正常退出码 0，异常退出码 1。"
+    #: 一条没有数字 / 路径 / 代码段的需求：专门用来喂出 W2（豁免用例需要一个 WARN 当靶子）。
+    plain_r3_new = "- **R3** 界面要顺手。"
 
     def sub(text: str, old: str, new: str) -> str:
         """替换前先断言目标真的在文本里。
@@ -759,6 +938,10 @@ def selftest() -> int:
     def from_clean() -> str:
         """基准件：把 R2 里的模糊词换成可判定的写法，这样 E9 只由 case 自己引入。"""
         return sub(SELFTEST_FIXTURE, vague_line, "输出控制在两行以内，")
+
+    def with_plain_r3() -> str:
+        """把 R3 换成一条没有数字/路径/具体对象的需求：豁免用例拿它当 W2 的靶子。"""
+        return sub(from_clean(), plain_r3, plain_r3_new)
 
     def insert_before_requirement(heading: str) -> str:
         """在真正的第 4 段前插一条同义标题：它带编号/数字开头时曾经把绑定抢走。"""
@@ -916,6 +1099,28 @@ def selftest() -> int:
          lambda: sub(from_clean(), "## 4. 需求（R#）",
                      "## 4. 需求（R#）\n\n（本节先留空，条目写在下面那条标题下。）\n\n## 需求清单"),
          set(), {"W8"}, "本次绑定用了没编号的「需求清单」"),
+        # ---- 豁免注释 --------------------------------------------------------
+        # 同段的 `pf-ignore` 吃掉这条 WARN，并如实报告「豁免了什么、理由是什么」。
+        ("豁免注释：同段的 W2 被吃掉",
+         lambda: sub(with_plain_r3(), plain_r3_new, plain_r3_new + "\n<!-- pf-ignore: W2 这版先不做量化 -->"),
+         set(), set(), "", {"W2"}),
+        # 写在别的段落里不算数：否则下一个人看到那条 WARN 时不知道有人处理过。
+        # （注意注释必须落在**另一段标题的后面**：写在 `## 5.` 之前它仍属于第 4 段。）
+        ("豁免注释：写在别的段落不算数",
+         lambda: sub(with_plain_r3(), "## 5. 非目标",
+                     "## 5. 非目标\n\n<!-- pf-ignore: W2 这版先不做量化 -->"),
+         set(), {"W2"}, "", set()),
+        # 想豁免 ERROR 本身就是错误：`0 ERROR 才允许交付` 不能被一条注释绕过去。
+        ("豁免注释：想豁免 ERROR 报 E11",
+         lambda: sub(SELFTEST_FIXTURE, vague_line, vague_line + "\n<!-- pf-ignore: E9 我觉得没事 -->"),
+         {"E9", "E11"}),
+        # 缺理由 / 码不认识 → E11，且被豁免的 WARN 照旧报出来。
+        ("豁免注释：缺理由报 E11",
+         lambda: sub(with_plain_r3(), plain_r3_new, plain_r3_new + "\n<!-- pf-ignore: W2 -->"),
+         {"E11"}, {"W2"}, "", set()),
+        ("豁免注释：码不认识报 E11",
+         lambda: sub(with_plain_r3(), plain_r3_new, plain_r3_new + "\n<!-- pf-ignore: W99 随便 -->"),
+         {"E11"}, {"W2"}, "", set()),
     ]
     for case in inline:
         name, build, want = case[0], case[1], case[2]
@@ -923,6 +1128,8 @@ def selftest() -> int:
         want_warns = case[3] if len(case) > 3 else None
         # 第五个元素是「报错文案里必须出现的一句话」：码集合对了但话说反了，同样算不通过。
         want_msg = case[4] if len(case) > 4 else ""
+        # 第六个元素是「期望被 `pf-ignore` 豁免掉的 WARN 码集合」（不写就不看豁免）。
+        want_ignored = case[5] if len(case) > 5 else None
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "case.prompt.md"
             try:
@@ -937,20 +1144,44 @@ def selftest() -> int:
                 failed += 1
                 continue
             path.write_text(text, encoding="utf-8")
-            findings, _ = check_file(path)
+            suppressed: list[tuple[Finding, str]] = []
+            findings, _ = check_file(path, suppressed=suppressed)
         got = {f.code for f in findings if f.level == "ERROR"}
         got_warns = {f.code for f in findings if f.level == "WARN"}
+        got_ignored = {f.code for f, _why in suppressed}
         ok = got == want and (want_warns is None or got_warns == want_warns)
         if ok and want_msg:
             ok = any(want_msg in f.message for f in findings)
+        if ok and want_ignored is not None:
+            ok = got_ignored == want_ignored
         print(f"{'PASS' if ok else 'FAIL'}  [闸门] {name}: ERROR 码 {sorted(got)}（期望 {sorted(want)}）"
               + ("" if want_warns is None else f" WARN 码 {sorted(got_warns)}（期望 {sorted(want_warns)}）")
-              + ("" if not want_msg else f" 文案须含「{want_msg}」"))
+              + ("" if not want_msg else f" 文案须含「{want_msg}」")
+              + ("" if want_ignored is None else f" 豁免 {sorted(got_ignored)}（期望 {sorted(want_ignored)}）"))
         if not ok:
             failed += 1
             for f in findings:
                 if f.level == "ERROR" or (want_warns is not None and f.level == "WARN"):
                     print(f"      {f.render()}")
+            for f, why in suppressed:
+                print(f"      豁免: {f.render()} —— 理由：{why}")
+
+    # `--no-ignore` 必须让豁免失效：看不见的 WARN 没法在评审时复查。
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "no-ignore.prompt.md"
+        path.write_text(
+            sub(with_plain_r3(), plain_r3_new, plain_r3_new + "\n<!-- pf-ignore: W2 这版先不做量化 -->"),
+            encoding="utf-8",
+        )
+        findings, _ = check_file(path, use_ignore=False)
+        got_warns = {f.code for f in findings if f.level == "WARN"}
+        ok = got_warns == {"W2"}
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] --no-ignore 时豁免注释失效: "
+              f"WARN 码 {sorted(got_warns)}（期望 ['W2']）")
+        if not ok:
+            failed += 1
+            for f in findings:
+                print(f"      {f.render()}")
 
     print(f"\n自测结果：{'全部通过' if not failed else f'{failed} 个用例不通过'}")
     return 1 if failed else 0
@@ -960,6 +1191,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="检查长提示词是否符合 prompt-forge 的 12 段契约")
     parser.add_argument("files", nargs="*", help="要检查的 prompt.md 路径")
     parser.add_argument("--selftest", action="store_true", help="用 examples/ 下的正反例自测")
+    parser.add_argument("--no-ignore", action="store_true",
+                        help="忽略 `<!-- pf-ignore: W码 理由 -->` 豁免注释，把所有 WARN 都报出来")
     args = parser.parse_args()
 
     if args.selftest:
@@ -980,7 +1213,7 @@ def main() -> int:
             print(f"ERROR: 文件不存在：{path}")
             code = 1
             continue
-        code |= report(path)
+        code |= report(path, use_ignore=not args.no_ignore)
     return code
 
 

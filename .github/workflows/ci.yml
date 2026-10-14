@@ -1,0 +1,71 @@
+name: 闸门
+
+# 三道闸门的自测 + 仓库自家资产实跑 + 变异检验。
+# 最要紧的是最后一项：把闸门源码里某一行改坏，如果自测还是全绿，说明那些自测是空跑的
+# （踩坑记录 #29），这时整个工作流必须失败 —— 光跑自测证明不了自测在看着代码。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: 闸门（Python ${{ matrix.python }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 是仓库承诺的最低版本（现代类型写法靠 `from __future__ import annotations` 撑住），
+        # 3.12 是当前主流版本；两头都跑，免得只在开发机的那个版本上绿。
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 三个闸门的自测
+        run: |
+          python -X utf8 -B scripts/check_prompt.py --selftest
+          python -X utf8 -B scripts/check_skill.py --selftest
+          python -X utf8 -B scripts/check_contract.py --selftest
+
+      - name: 变异检验（把闸门改坏，自测必须变红）
+        run: python -X utf8 -B scripts/mutate_checks.py
+
+      - name: 仓库自己的资产要过闸门（0 ERROR）
+        run: |
+          python -X utf8 -B scripts/check_prompt.py \
+            "examples/例1-下载文件夹整理.prompt.md" \
+            "examples/例2-班级报名网站.prompt.md" \
+            "templates/提示词骨架.md"
+          python -X utf8 -B scripts/check_contract.py \
+            "examples/例1-下载文件夹整理.prompt.md" \
+            "examples/例2-班级报名网站.prompt.md" \
+            "templates/提示词骨架.md"
+          python -X utf8 -B scripts/check_skill.py SKILL.md
+
+      - name: 反例必须被拦下（非零退出）
+        run: |
+          if python -X utf8 -B scripts/check_prompt.py "examples/反例-模糊需求.prompt.md"; then
+            echo "::error::反例-模糊需求.prompt.md 竟然 0 ERROR 通过 —— 闸门① 漏了"
+            exit 1
+          fi
+
+      - name: 仓库文本必须是 LF
+        run: |
+          # 这条来自一次真实事故：Python 的 Path.write_text() 默认 newline=None，
+          # 在 `* text=auto eol=lf` 下会把文件写成 CRLF（踩坑记录里记着）。
+          if git grep -I -l $'\r' -- . ':!*.cmd' ':!*.bat'; then
+            echo "::error::上面这些文件里出现了 CRLF —— 本仓库约定全部 LF（见 .gitattributes）"
+            exit 1
+          fi
