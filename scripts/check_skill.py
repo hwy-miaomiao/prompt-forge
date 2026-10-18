@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -902,10 +903,31 @@ def selftest() -> int:
                 print("      " + f.render())
 
     # 安装形态：name 必须等于**安装目录**名，不能解析链接（审计 P29）。
-    # 符号链接在 CI 的 Linux 上可直接建；Windows 没有开发者模式时跳过（本地 junction 夹具已人工验过）。
-    def link_case(label: str, real_name: str, link_name: str, want_e3: bool) -> None:
+    # Linux 上直接建符号链接；Windows 没有开发者模式建不了符号链接，但 junction 不需要权限
+    # （mklink /J），所以退回 junction 跑同一组用例。两条用例在本地必须真跑：只在 Linux CI
+    # 上才红的夹具错误没人拦得住（本轮就踩过一次，见 v1.0.x 的 check_skill 自测修复）。
+    def make_dir_link(real: Path, link: Path) -> bool:
+        try:
+            os.symlink(real, link, target_is_directory=True)
+            return True
+        except (OSError, NotImplementedError):
+            pass
+        if os.name != "nt":
+            return False
+        try:
+            proc = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(real)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        except OSError:
+            return False
+        return proc.returncode == 0 and link.is_dir()
+
+    def link_case(label: str, real_name: str, link_name: str, skill_name: str, want_e3: bool) -> None:
         nonlocal failed
-        skill = ("---\nname: " + real_name + "\n"
+        skill = ("---\nname: " + skill_name + "\n"
                  "description: 使用本技能：当用户要整理文件时按类型归类。不接：与文件整理无关的任务。\n"
                  "---\n\n正文。\n")
         with tempfile.TemporaryDirectory() as tmp:
@@ -914,10 +936,8 @@ def selftest() -> int:
             real.mkdir()
             write_text_lf(real / "SKILL.md", skill)
             link = root / link_name
-            try:
-                os.symlink(real, link, target_is_directory=True)
-            except (OSError, NotImplementedError):
-                print(f"SKIP  [闸门] {label}: 当前环境建不了目录符号链接（Windows 需开发者模式），"
+            if not make_dir_link(real, link):
+                print(f"SKIP  [闸门] {label}: 当前环境建不了目录链接（符号链接与 junction 都失败），"
                       "该场景用本地 junction 夹具人工验证")
                 return
             findings, _ = check_skill(link / "SKILL.md")
@@ -930,8 +950,11 @@ def selftest() -> int:
                 for f in findings:
                     print("      " + f.render())
 
-    link_case("安装目录与真实目录名不同（不解析链接）", "real-skill", "installed-as", True)
-    link_case("链接名就是安装名时不能假报 E3", "target-dir", "linked-name", False)
+    # ① 真实目录 real-skill、安装名 installed-as，frontmatter 仍是 real-skill：
+    #    该报 E3（旧版 resolve() 会漏报）。② 真实目录 target-dir、安装名 linked-name，
+    #    frontmatter 也是 linked-name：不该报 E3（旧版 resolve() 会误报）。
+    link_case("安装目录与真实目录名不同（不解析链接）", "real-skill", "installed-as", "real-skill", True)
+    link_case("链接名就是安装名时不能假报 E3", "target-dir", "linked-name", "linked-name", False)
 
     print(f"\n自测结果：{'全部通过' if not failed else f'{failed} 个用例不通过'}")
     return 1 if failed else 0

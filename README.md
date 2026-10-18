@@ -103,7 +103,7 @@ python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 # PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
 # PASS  [示例] good-minimal: ERROR [] WARN []（期望 ERROR [] WARN []）
-# …… 共 45 个用例（其中 2 个目录符号链接用例在没有建链接权限的环境显示 SKIP）
+# …… 共 45 个用例（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑）
 #      = 真实 SKILL.md + 9 个真实示例 + 33 个内置闸门用例（含行号、BOM、长句触发、
 #      `go` 不被 `good` / `Go 语言` 命中、「不接（kill）」不算写了「接」等）
 
@@ -182,7 +182,7 @@ python scripts/check_prompt.py 输出/<slug>/prompt.md
 
 ```bash
 python scripts/check_skill.py SKILL.md
-python scripts/check_skill.py --selftest   # 45 个用例（2 个符号链接用例在无建链接权限的环境显示 SKIP）
+python scripts/check_skill.py --selftest   # 45 个用例（2 个链接安装用例：Linux 符号链接 / Windows junction 真跑）
 ```
 
 查的是「自动识别」这件事能不能成立：
