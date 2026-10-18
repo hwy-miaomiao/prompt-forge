@@ -47,10 +47,12 @@ jobs:
           python -X utf8 -B scripts/check_prompt.py \
             "examples/例1-下载文件夹整理.prompt.md" \
             "examples/例2-班级报名网站.prompt.md" \
+            "examples/例3-logsift-json-export.prompt.md" \
             "templates/提示词骨架.md"
           python -X utf8 -B scripts/check_contract.py \
             "examples/例1-下载文件夹整理.prompt.md" \
             "examples/例2-班级报名网站.prompt.md" \
+            "examples/例3-logsift-json-export.prompt.md" \
             "templates/提示词骨架.md"
           python -X utf8 -B scripts/check_skill.py SKILL.md
 
@@ -65,7 +67,10 @@ jobs:
         run: |
           # 这条来自一次真实事故：Python 的 Path.write_text() 默认 newline=None，
           # 在 `* text=auto eol=lf` 下会把文件写成 CRLF（踩坑记录里记着）。
-          if git grep -I -l $'\r' -- . ':!*.cmd' ':!*.bat'; then
-            echo "::error::上面这些文件里出现了 CRLF —— 本仓库约定全部 LF（见 .gitattributes）"
+          # 不能用 `git grep $'\r'`：启用 `eol=lf` 后工作区里的换行已被归一，
+          # 那条命令永远不命中（审计 P18）。看索引里的真实行尾：i/ 是索引、w/ 是工作区，
+          # crlf 或 mixed 都算违反约定。
+          if git ls-files --eol | grep -E '^i/(crlf|mixed)'; then
+            echo "::error::上面这些文件的索引行尾是 CRLF 或混合 —— 本仓库约定全部 LF（见 .gitattributes）"
             exit 1
           fi

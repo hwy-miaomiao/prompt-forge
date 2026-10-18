@@ -27,7 +27,8 @@
     用户看到两条一样的提示。
   * **C4 是关键词重叠启发式**（中文二元组 + 英文词），所以只报 WARN：它说的是
     「这条未确认可能没有落脚点」，不是判决。看不出重叠才报，看得出就闭嘴。
-  * 行号口径与闸门① 一致（`splitlines()`）：两个闸门对同一个文件必须报同一个行号。
+  * 行号口径与闸门① 一致（`check_prompt.split_lines()`：只按 `\n` 切，U+2028 不当换行，
+    所以两个闸门对同一个文件必须报同一个行号，审计 P35）。
   * 用法错误（路径是目录 / 文件不存在）沿用闸门① 的写法：直接 `ERROR: …`，不带码 ——
     那不是在评文档，是在说命令行写错了。
 
@@ -53,6 +54,12 @@ import check_prompt as cp  # noqa: E402  （同目录，故意复用闸门① �
 
 #: 本闸门自己的码（C1/C3 是 ERROR，其余是 WARN）。
 C_CODES = ("C1", "C2", "C3", "C4", "C5")
+#: 本闸门的码里哪些是 ERROR：`pf-ignore` 不能豁免它们（写进注释会报 E11，审计 P32）。
+C_ERROR_CODES = ("C1", "C3")
+#: 能被 `pf-ignore` 豁免的 C 码（WARN）。
+C_WARN_CODES = ("C2", "C4", "C5")
+#: 纸张规格后缀：`A4 纸` / `A3 幅面` / `A0/A1 幅面` / `A2 出图` 里的编号不是验收编号（审计 P25）。
+_PAPER_SPEC_TAIL_RE = re.compile(r"^\s*(?:的\s*)?(?:/\s*[A-Za-z]?\d+\s*)*(?:纸|图纸|幅面|幅|开本|出)")
 
 LABEL_REQ = "4 需求（R#）"
 LABEL_ACC = "7 验收标准（A#）"
@@ -63,8 +70,9 @@ COMMAND_HINT_RE = re.compile(
     r"java|pytest|ruff|mypy|deno|bun|curl|sqlite3)\b",
     re.IGNORECASE,
 )
+#: 「判定：命令」里认的可执行文件 / 脚本路径；数据文件（.csv/.json/.xlsx）不算命令（审计 P33）。
 SCRIPT_RE = re.compile(
-    r"[\w./\\-]+\.(?:py|sh|ps1|bat|cmd|js|mjs|cjs|ts|json|ya?ml|toml|ini|csv|xlsx)\b",
+    r"[\w./\\-]+\.(?:py|sh|ps1|bat|cmd|js|mjs|cjs|ts|exe)\b",
     re.IGNORECASE,
 )
 
@@ -130,11 +138,15 @@ def check_refs(lines: list[str], fenced: list[bool], known: dict[str, set[int]])
         clean = cp.strip_comments(line)
         if not clean.strip():
             continue
+        # 行内代码里的是示例，不是引用（审计 P25）：等长替换成空格，偏移量不变。
+        clean = cp.CODE_SPAN_RE.sub(lambda m: " " * len(m.group(0)), clean)
         for letter, label in (("R", LABEL_REQ), ("A", LABEL_ACC)):
             marker_end = _definition_end(clean, letter)
-            for match in re.finditer(rf"{letter}(\d+)(?!\d)", clean):
+            for match in re.finditer(rf"(?<![A-Za-z0-9_]){letter}(\d+)(?!\d)", clean):
                 if match.start() < marker_end:
                     continue  # 这一处是条目自己的编号，不是引用
+                if _PAPER_SPEC_TAIL_RE.match(clean[match.end():]):
+                    continue  # `A4 纸` / `A0/A1 幅面` / `A2 出图` 是纸张规格，不是验收编号（审计 P25）
                 num = int(match.group(1))
                 if num not in known[letter]:
                     findings.append(cp.Finding(
@@ -194,6 +206,31 @@ def check_step_coverage(
     ) for num in sorted(requirements - seen)]
 
 
+#: 「否定句」里的未确认不算未确认项：`无未确认项`、`没有未确认的地方`（审计 P26）。
+_DENY_UNCONFIRMED_RE = re.compile(
+    r"(?:无|没有|暂无|并未|不存在|无需|不需|不要|不必)[^。；\n]{0,6}未确认"
+)
+
+
+def _mentions_unconfirmed(text: str) -> bool:
+    """这一行是不是真的在说「有未确认的东西」——否定句不算（审计 P26）。"""
+    return "未确认" in _DENY_UNCONFIRMED_RE.sub("", text)
+
+
+def _assumption_block(lines: list[str], idx: int, lo: int, hi: int) -> str:
+    """取「未确认」所在的那一整块：上下连续的非空行，遇到标题/空行就停。
+
+    多行假设、或把状态写在续行时，只比对含「未确认」那一行会漏掉关键词（审计 P36）。
+    """
+    start = idx
+    while start > lo and lines[start - 1].strip() and not cp.HEADING_RE.match(lines[start - 1]):
+        start -= 1
+    end = idx + 1
+    while end < hi and lines[end].strip() and not cp.HEADING_RE.match(lines[end]):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
 def check_open_items(
     lines: list[str], fenced: list[bool], sections: list[tuple[str, int, int, int, bool]]
 ) -> list[cp.Finding]:
@@ -206,7 +243,7 @@ def check_open_items(
         if fenced[idx]:
             continue
         clean = cp.strip_comments(lines[idx]).strip()
-        if "未确认" in clean:
+        if _mentions_unconfirmed(clean):
             pending.append((idx + 1, clean))
     if not pending:
         return []
@@ -228,7 +265,8 @@ def check_open_items(
     known = keywords(body11)
     findings: list[cp.Finding] = []
     for line_no, text in pending:
-        if keywords(text) & known:
+        block = _assumption_block(lines, line_no - 1, sec10[0] + 1, min(sec10[1], len(lines)))
+        if keywords(block) & known:
             continue
         snippet = re.sub(r"\s+", " ", text)[:60]
         findings.append(cp.Finding(
@@ -273,7 +311,11 @@ def check_contract(
     会被当成「这份文件跨段一致性没问题」（段落齐不齐是闸门① 的事）。
     """
     raw = cp.read_text(path)
-    lines = raw.splitlines()
+    # 两套行视图，行号一一对应（见 check_prompt.check_file 里同样的分法）：
+    #   text_lines —— 原文：pf-ignore 注释本身在这一版；
+    #   lines      —— 正文：跨段一致性只看正文，注释里的标题 / R# / A# 不算数（审计 F1）。
+    text_lines = cp.split_lines(raw)
+    lines = cp.split_lines(cp.strip_comments(raw))
     fenced = cp.fence_lines(lines)
     sections, _preamble = cp.split_sections(lines)
     requirements, _dups_r = cp.collect_items(lines, "R")
@@ -286,15 +328,19 @@ def check_contract(
     findings.extend(check_open_items(lines, fenced, sections))
     findings.extend(check_judgements(lines, fenced, acceptances))
 
-    if use_ignore:
-        # 豁免码表 = 闸门① 的 W 码 + 本闸门的 C 码：同一个注释在两个闸门里都认自己的码，
-        # 写错码（比如在闸门① 里写 `pf-ignore: C2`）会老老实实报 E11。
-        ignores, problems = cp.parse_ignores(lines, codes=cp.IGNORE_CODES + C_CODES)
-        findings.extend(problems)
-        if ignores:
-            findings, dropped = cp.apply_ignores(findings, ignores, cp.section_index(lines, sections))
-            if suppressed is not None:
-                suppressed.extend(dropped)
+    # 豁免注释无论 --no-ignore 都要解析：写错的豁免（给 ERROR 码、码不认识、理由太短）
+    # 是文档缺陷，--no-ignore 也不能把它吞掉（审计 P31/P32）。
+    # 豁免码表 = 闸门① 的 W 码 + 本闸门的 WARN 码；ERROR 码（E*/C1/C3）写进注释会报 E11。
+    ignores, problems = cp.parse_ignores(
+        text_lines,
+        codes=cp.IGNORE_CODES + C_WARN_CODES,
+        error_codes=cp.ERROR_CODES + C_ERROR_CODES,
+    )
+    findings.extend(problems)
+    if use_ignore and ignores:
+        findings, dropped = cp.apply_ignores(findings, ignores, cp.section_index(lines, sections))
+        if suppressed is not None:
+            suppressed.extend(dropped)
 
     note = ""
     if find_section(sections, 9) is None:
@@ -311,7 +357,14 @@ def check_contract(
 
 def report(path: Path, use_ignore: bool = True) -> int:
     suppressed: list[tuple[cp.Finding, str]] = []
-    findings, size, note = check_contract(path, use_ignore=use_ignore, suppressed=suppressed)
+    try:
+        findings, size, note = check_contract(path, use_ignore=use_ignore, suppressed=suppressed)
+    except cp.FileReadError as exc:
+        # 与闸门① 同一口径：读不了文件打印一行 ERROR，退出码 1，不抛 traceback（审计 F2）。
+        print(f"\n=== 检查 {path} ===")
+        print(f"ERROR: {exc}")
+        print("结果：1 ERROR, 0 WARN —— 未通过")
+        return 1
     errors = [f for f in findings if f.level == "ERROR"]
     warns = [f for f in findings if f.level == "WARN"]
     print(f"\n=== 检查 {path} （{size} 字符） ===")
@@ -388,11 +441,41 @@ def selftest() -> int:
         ("C5 给了命令就不报",
          lambda: sub(base, "判定：人工 看 main 分支。", "判定：命令 `python scripts/borrow.py`。"),
          set(), set(), set(), ""),
+        # —— 以下用例来自第 4 轮审计 P25/P26/P30/P32/P33/P36，每条都先跑真实夹具确认过 ——
+        ("C1 不把「A4 纸」当验收编号（行内代码里的编号也不算）",
+         lambda: sub(base, "## 4. 需求（R#）",
+                     "## 4. 需求（R#）\n\n- 打印名单按 A4 纸纵向排版，页面规格写 `A4`。\n"
+                     "- 交付 A0/A1 幅面图纸，以及图纸按 A2 出图。"),
+         set(), set(), set(), ""),
+        ("C3/C4「无未确认项」是否定句，不算未确认（第 11 段写「无」也不报 C3）",
+         lambda: sub(sub(base,
+                         "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                         "- 无未确认项：全部假设已在阶段 2 与用户拍板确认。"),
+                     section11, "无。"),
+         set(), set(), set(), ""),
+        ("C4 多行假设按整块取关键词（未确认写在续行）",
+         lambda: sub(base,
+                     "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                     "- 假设 A1：表头在第 1 行，直接按表头解析。\n"
+                     "- 状态：未确认（默认取第 1 行；改起来要改 header 参数）。"),
+         set(), set(), set(), ""),
+        ("C5 只有数据文件路径（.csv）不算命令",
+         lambda: sub(base, "判定：命令 `python scripts/borrow.py`。",
+                     "判定：命令 用 Excel 打开 out/borrow.csv 数一遍列。"),
+         set(), {"C5"}, set(), ""),
+        ("C5 判定：人工 里出现「命令」两个字不算判定：命令",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：人工 由产品经理看截图确认，这条不用跑命令。"),
+         set(), set(), set(), ""),
+        ("豁免注释：给 ERROR 码（C1）写 pf-ignore 报 E11",
+         lambda: sub(base, "## 5. 非目标",
+                     "## 5. 非目标\n\n<!-- pf-ignore: C1 这条引用先不管 -->"),
+         {"E11"}, set(), set(), ""),
         ("豁免注释：同段的 C2 被吃掉", c2_exempt, set(), set(), {"C2"}, ""),
     ]
 
     failed = 0
-    print(f"闸门③ 自测：{len(cases)} 个用例 + 1 个 --no-ignore 用例 + 2 个范围说明用例")
+    print(f"闸门③ 自测：{len(cases)} 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例")
     with tempfile.TemporaryDirectory() as tmp:
         for idx, (name, build, want_errors, want_warns, want_ignored, want_msg) in enumerate(cases):
             try:
@@ -431,6 +514,42 @@ def selftest() -> int:
         ok = got_warns == {"C2"}
         print(f"{'PASS' if ok else 'FAIL'}  [闸门③] --no-ignore 时豁免注释失效: "
               f"WARN 码 {sorted(got_warns)}（期望 ['C2']）")
+        if not ok:
+            failed += 1
+            for finding in findings:
+                print("      " + finding.render())
+
+        # `--no-ignore` 也不能把写错的豁免吞掉（审计 P31/P32）：E11 与真 WARN 都要露出来。
+        path = Path(tmp) / "no-ignore-e11.prompt.md"
+        path.write_text(
+            sub(c2_exempt(), "## 5. 非目标", "## 5. 非目标\n\n<!-- pf-ignore: C1 想盖掉一个 ERROR 码 -->"),
+            encoding="utf-8",
+        )
+        findings, _size, _note = check_contract(path, use_ignore=False)
+        got_codes = {f.code for f in findings}
+        ok = {"C2", "E11"} <= got_codes
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门③] --no-ignore 时写错的豁免照样报 E11: "
+              f"码 {sorted(got_codes)}（期望含 ['C2', 'E11']）")
+        if not ok:
+            failed += 1
+            for finding in findings:
+                print("      " + finding.render())
+
+        # U+2028 不是换行：行号必须按真实 `\n` 计，不能漂（审计 P35）。
+        noisy = sub(base, "（对应 R3）** 入口与退出码符合要求",
+                    "（对应 R9、R3）** 入口与退出码符合要求")
+        noisy = sub(noisy, "## 2. 背景与已知事实", "## 2. 背景与已知事实\n\n第一行\u2028第二行")
+        want_line = next(
+            i for i, line in enumerate(noisy.split("\n"), 1) if "R9、R3" in line
+        )
+        path = Path(tmp) / "u2028.prompt.md"
+        path.write_text(noisy, encoding="utf-8")
+        findings, _size, _note = check_contract(path)
+        c1_findings = [f for f in findings if f.code == "C1"]
+        ok = bool(c1_findings) and all(f.line == want_line for f in c1_findings)
+        got_lines = sorted({f.line for f in c1_findings})
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门③] U+2028 不算换行：C1 行号 {got_lines}"
+              f"（期望 [{want_line}]）")
         if not ok:
             failed += 1
             for finding in findings:

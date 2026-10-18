@@ -70,18 +70,18 @@ MUTATIONS: list[Mutation] = [
     # ---------- 闸门①：长提示词 ----------
     Mutation(
         "围栏里的标题不算段落", "check_prompt.py",
-        "        if fenced[idx]:\n            continue\n        if HEADING_RE.match(line):",
+        "        if fenced[idx] or indented[idx]:\n            continue\n        if HEADING_RE.match(line):",
         "        if False:\n            continue\n        if HEADING_RE.match(line):",
     ),
     Mutation(
         "围栏里的条目不算条目", "check_prompt.py",
-        "        if fenced[idx]:\n            continue\n        num = item_start(line, letter)",
+        "        if fenced[idx] or indented[idx]:\n            continue\n        num = item_start(line, letter)",
         "        if False:\n            continue\n        num = item_start(line, letter)",
     ),
     Mutation(
         "围栏开关恒为假", "check_prompt.py",
-        "        flags.append(fence is not None)",
-        "        flags.append(False)",
+        "                fence = (run[0], len(run))",
+        "                fence = None",
     ),
     Mutation(
         "验收只认条目行上的引用", "check_prompt.py",
@@ -99,24 +99,26 @@ MUTATIONS: list[Mutation] = [
         "            return (not c[3], not c[5], not c[4], c[0], c[2])",
     ),
     Mutation(
-        "豁免注释被当成条目正文", "check_prompt.py",
-        "        body = strip_comments(item_body(text))",
-        "        body = item_body(text)",
+        "注释内容被当成正文", "check_prompt.py",
+        "    lines = split_lines(strip_comments(raw))",
+        "    lines = split_lines(raw)",
     ),
     # ---------- 闸门②：技能定义 ----------
     Mutation(
-        "ASCII 标记退回折叠子串（good 命中 go）", "check_skill.py",
-        "    if ASCII_MARKER_RE.fullmatch(marker):",
-        "    if False:",
+        "三态接受词退回裸 go/接（（Go 语言与不接（kill）都算接住）", "check_skill.py",
+        '        if claims_triage and not (has_marker(prose, TRIAGE_STATE_MARKERS)\n'
+        '                                  and has_marker(prose, TRIAGE_ACCEPT_MARKERS)):',
+        '        if claims_triage and not (has_marker(prose, TRIAGE_STATE_MARKERS)\n'
+        '                                  and has_marker(prose, ["接（", "go", "needs-clarification"])):',
     ),
     Mutation(
         "三态接受词退回裸「接（」（不接（kill）也算接）", "check_skill.py",
-        'TRIAGE_ACCEPT_MARKERS = [r"re:(?<!不)接[（(]", "go", "needs-clarification"]',
-        'TRIAGE_ACCEPT_MARKERS = ["接（", "go", "needs-clarification"]',
+        'TRIAGE_ACCEPT_MARKERS = [\n    r"re:(?<!不)接[（(]",',
+        'TRIAGE_ACCEPT_MARKERS = [\n    "接（",',
     ),
     Mutation(
-        "目录名退回词法路径（带 .. 时误报 E3）", "check_skill.py",
-        "        dirname = path.resolve().parent.name",
+        "目录名不归一化（带 .. 时误报 E3）", "check_skill.py",
+        "        dirname = Path(os.path.normpath(os.path.abspath(str(path)))).parent.name",
         "        dirname = path.parent.name",
     ),
     Mutation(
@@ -137,7 +139,7 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "C4 一律认为对得上", "check_contract.py",
-        "        if keywords(text) & known:",
+        "        if keywords(block) & known:",
         "        if True:",
     ),
     Mutation(

@@ -77,9 +77,11 @@ WHEN_MARKERS = [
     r"re:(?<!不)(?:适用|触发)",
 ]
 
-#: 「当…时」句式：当 + 至多 10 个非标点字符 + 时/时候。
+#: 「当…时」句式：当 + 至多 40 个非句末标点字符 + 时/时候。
+#: 只认 10 个字会漏掉正常长度的触发句（审计 P28）；`当(?!前|相)` 挡住「当前/相当」。
+#: 逗号/分号/句号/叹号/问号仍算句界，不允许跨过去 —— 否则整段话都被当成一个「当…时」。
 WHEN_PATTERNS = [
-    re.compile(r"当[^，。；、！？\s]{0,10}(?:时|时候)"),
+    re.compile(r"当(?!前|相)[^，。；！？\n]{0,40}?(?:时|时候)"),
 ]
 
 #: 「何时不该用」的标记：官方口径是"描述过宽 = 在不该触发的时候触发"，
@@ -107,10 +109,31 @@ THIRD_PERSON_MARKERS = [
 #: 注意：**不是所有技能都要写分诊**。只有正文声称了自己会做"该不该接"的判断时，才要求它写全三态 ——
 #: 否则就是拿 prompt-forge 的家规去要求别人的技能（这条曾经误报过一大片）。
 TRIAGE_CLAIM_MARKERS = ["分诊", "该不该接", "接不接"]
-TRIAGE_STATE_MARKERS = ["不接", "kill"]
-#: 「接（go）」写成 `(?<!不)接[（(]`：`不接（kill）` 里的那半截「接（」**不算**写过接住态。
-#: （旧版就是这么把 W3 骗过去的：只写「不接（kill）」也算三态齐全。）
-TRIAGE_ACCEPT_MARKERS = [r"re:(?<!不)接[（(]", "go", "needs-clarification"]
+#: 「不接（kill）」这一态。`kill` 必须带三态语境，裸词不算：很多技能正文会写「kill 进程」
+#: （审计 P34：把裸 ASCII 标记改成有语境的形状）。
+TRIAGE_STATE_MARKERS = [
+    "不接",
+    r"re:`kill`",
+    r"re:不接[（(]?kill",
+    r"re:(?:/|、)kill",
+    r"re:kill[）)]",
+    r"re:kill态",
+    r"re:(?<![A-Za-z0-9])KILL(?![A-Za-z0-9])",
+]
+#: 「接（go）」这一态。`(?<!不)接[（(]`：`不接（kill）` 里的那半截「接（」**不算**写过接住态。
+#: 裸 `go` 不算：正文里的「用 Go 写」「Go 版本 1.22」会把三态检查骗绿（审计 P34）；
+#: 只有反引号包住、括号里、`接 go`、`go /` 或在全大写时才认。
+TRIAGE_ACCEPT_MARKERS = [
+    r"re:(?<!不)接[（(]",
+    r"re:`go`",
+    r"re:接go",
+    r"re:(?:[（(/、])go(?=[）)/、,，。]|$)",
+    r"re:go[（(]",
+    r"re:go[/）)]",
+    r"re:go态",
+    r"re:(?<![A-Za-z0-9])GO(?![A-Za-z0-9])",
+    "needs-clarification",
+]
 
 #: 薄包装正文第一步必须指向同目录的规范本体，并写清"先把它读完"。
 #: SPEC_FILE_MARKERS（哪些文件算规范本体）在下面的 SIBLING_PATTERNS 旁边定义，两处共用一份。
@@ -157,9 +180,13 @@ class Finding:
 
 
 def read_text(path: Path) -> str:
-    """读文件：UTF-8 优先，退回系统默认编码（Windows 上的中文文件可能是 GBK）。"""
+    """读文件：UTF-8（含 BOM）优先，退回系统默认编码（Windows 上的中文文件可能是 GBK）。
+
+    用 utf-8-sig 而不是 utf-8：带 BOM 的 SKILL.md 会被前者解码成干净文本，
+    否则 BOM 留在开头，`---` 认不出来，报一个假的 E1（审计 P27）。
+    """
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError:
         return path.read_text(encoding="gbk", errors="replace")
 
@@ -384,9 +411,11 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
     if name:
         if len(name) > NAME_MAX or not NAME_RE.match(name):
             findings.append(Finding("ERROR", "E2", f"name「{name}」不符合规范：{NAME_RULE}", name_line))
-        # 目录名必须取**解析后**的父目录名：`scripts/..\SKILL.md`、`./SKILL.md` 这种写法下
-        # `path.parent.name` 是 `..` 或空串，拿它比对会把好文件判成 E3（真实审计里撞到过）。
-        dirname = path.resolve().parent.name
+        # 目录名只做**路径层**归一化（abspath + normpath），不解析符号链接 / junction：
+        # `path.parent.name` 在 `scripts/..\SKILL.md`、`./SKILL.md` 下是 `..` 或空串（判假 E3）；
+        # 而 `path.resolve()` 会把 junction 指到真实目录，拿真实目录名比又判假 E3
+        # —— 安装目录名才是宿主登记技能时用的名字（审计 P29）。
+        dirname = Path(os.path.normpath(os.path.abspath(str(path)))).parent.name
         if name != dirname:
             findings.append(Finding("ERROR", "E3",
                                     f"name「{name}」与所在目录名「{dirname}」不一致；"
@@ -818,7 +847,16 @@ def selftest() -> int:
          sub(SELFTEST_FIXTURE, desc_line,
              "description: 当文件夹很乱时，用本技能把它整理成分类目录。不接：与文件整理无关的任务。"),
          set())
-    # `scripts\..\SKILL.md` 这种写法下 path.parent.name 是 `..`：目录名必须取解析后的父目录名
+    # `当…时` 句子长一点也要认（审计 P28：旧版限 10 字，正常长度就漏）
+    case("长一点的当…时 也算触发条件",
+         sub(SELFTEST_FIXTURE, desc_line,
+             "description: 当用户提出一个说不清的目标、又必须交给另一个 AI 去执行的模糊需求时，"
+             "用本技能把它写成可执行的提示词。不接：与需求澄清无关的任务。"),
+         set())
+    # 正文里的 Go 语言名不能冒充「接（go）」三态（审计 P34）
+    case("正文用 Go 语言写脚本不算写了 go 三态",
+         sub(SELFTEST_FIXTURE, "接（go）", "不接（kill），脚本用 Go 写"), {"W3"})
+    # `scripts\..\SKILL.md` 这种写法下 path.parent.name 是 `..`：目录名按 normpath 归一化后的词法路径取
     with tempfile.TemporaryDirectory() as tmp:
         skill_dir = Path(tmp) / "prompt-forge"
         (skill_dir / "sub").mkdir(parents=True)
@@ -830,7 +868,7 @@ def selftest() -> int:
         findings, _ = check_skill(skill_dir / "sub" / ".." / "SKILL.md")
         got = {f.code for f in findings if f.level == "ERROR"}
         ok = not got
-        print(f"{'PASS' if ok else 'FAIL'}  [闸门] 路径里带 .. 时目录名要取解析结果: ERROR 码 {sorted(got)}（期望 []）")
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] 路径里带 .. 时目录名按词法路径取（不解析链接）: ERROR 码 {sorted(got)}（期望 []）")
         if not ok:
             failed += 1
             for f in findings:
@@ -845,6 +883,55 @@ def selftest() -> int:
             failed += 1
             for f in findings:
                 print("      " + f.render())
+
+    # 带 UTF-8 BOM 的 SKILL.md 不能报假 E1（审计 P27：旧版按 utf-8 解码，首行变成 \ufeff---）
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_dir = Path(tmp) / "bom-skill"
+        skill_dir.mkdir()
+        body = ("---\nname: bom-skill\n"
+                "description: 使用本技能：当用户要整理文件时按类型归类。不接：与文件整理无关的任务。\n"
+                "---\n\n正文。\n")
+        (skill_dir / "SKILL.md").write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        findings, _ = check_skill(skill_dir / "SKILL.md")
+        codes = {f.code for f in findings}
+        ok = codes == set()
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] 带 BOM 的 SKILL.md 不报假 E1（P27）: 码 {sorted(codes)}（期望 []）")
+        if not ok:
+            failed += 1
+            for f in findings:
+                print("      " + f.render())
+
+    # 安装形态：name 必须等于**安装目录**名，不能解析链接（审计 P29）。
+    # 符号链接在 CI 的 Linux 上可直接建；Windows 没有开发者模式时跳过（本地 junction 夹具已人工验过）。
+    def link_case(label: str, real_name: str, link_name: str, want_e3: bool) -> None:
+        nonlocal failed
+        skill = ("---\nname: " + real_name + "\n"
+                 "description: 使用本技能：当用户要整理文件时按类型归类。不接：与文件整理无关的任务。\n"
+                 "---\n\n正文。\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / real_name
+            real.mkdir()
+            write_text_lf(real / "SKILL.md", skill)
+            link = root / link_name
+            try:
+                os.symlink(real, link, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                print(f"SKIP  [闸门] {label}: 当前环境建不了目录符号链接（Windows 需开发者模式），"
+                      "该场景用本地 junction 夹具人工验证")
+                return
+            findings, _ = check_skill(link / "SKILL.md")
+            got = {f.code for f in findings if f.level == "ERROR"}
+            want = {"E3"} if want_e3 else set()
+            ok = got == want
+            print(f"{'PASS' if ok else 'FAIL'}  [闸门] {label}: ERROR 码 {sorted(got)}（期望 {sorted(want)}）")
+            if not ok:
+                failed += 1
+                for f in findings:
+                    print("      " + f.render())
+
+    link_case("安装目录与真实目录名不同（不解析链接）", "real-skill", "installed-as", True)
+    link_case("链接名就是安装名时不能假报 E3", "target-dir", "linked-name", False)
 
     print(f"\n自测结果：{'全部通过' if not failed else f'{failed} 个用例不通过'}")
     return 1 if failed else 0

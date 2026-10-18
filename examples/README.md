@@ -1,11 +1,12 @@
 # 示例：一句话是怎么变成能开工的长提示词的
 
-三个文件：
+四个文件：
 
 | 文件 | 用途 |
 | --- | --- |
 | `例1-下载文件夹整理.prompt.md` | 正例：脚本类需求，**必须 0 ERROR**（脚本自测用） |
 | `例2-班级报名网站.prompt.md` | 正例：Web 类需求，**必须 0 ERROR** |
+| `例3-logsift-json-export.prompt.md` | 正例：改造已有仓库类需求（给既有 Python CLI 加 `--json` 导出），**必须 0 ERROR** |
 | `反例-模糊需求.prompt.md` | 反例：典型的"一句话丢给 AI"，**必须被拦下 ≥5 个 ERROR** |
 
 自测（改了脚本或示例后必跑）：
@@ -14,18 +15,19 @@
 python scripts/check_prompt.py --selftest
 # PASS  例1-下载文件夹整理.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  例2-班级报名网站.prompt.md: 0 ERROR（期望 0 ERROR）
+# PASS  例3-logsift-json-export.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  反例-模糊需求.prompt.md: 16 ERROR（期望 >=5 ERROR）
 # PASS  templates/提示词骨架.md: 0 ERROR, 0 WARN（期望 0 ERROR 0 WARN）
 ```
 
-自测扫的是 `examples/*.prompt.md` 全部三个文件：名字里带「反例」的按 **≥5 ERROR** 判，
+自测扫的是 `examples/*.prompt.md` 全部四个文件：名字里带「反例」的按 **≥5 ERROR** 判，
 其余按 **0 ERROR** 判；另外把仓库自带的 `templates/提示词骨架.md` 也单列成一个用例
 （要求 **0 ERROR 0 WARN** —— 给人抄的模板自己必须先干净）；
 判据硬编码在 `scripts/check_prompt.py` 的 `selftest()` 里。
 
 ## 还有一组：`examples/技能定义/`（闸门②的夹具）
 
-上面三个文件验的是**长提示词**；[`技能定义/`](技能定义/README.md) 验的是**这个技能自己的定义**
+上面四个文件验的是**长提示词**；[`技能定义/`](技能定义/README.md) 验的是**这个技能自己的定义**
 能不能被宿主自动识别 —— 名字合不合规、描述里有没有"何时该用 / 何时不该用"、
 薄包装有没有把同目录的规范一起带上。9 个目录（1 正 8 反）+ 每个的预期 ERROR/WARN 码见
 [`技能定义/README.md`](技能定义/README.md)。
@@ -37,17 +39,17 @@ python scripts/check_skill.py --selftest
 # ... 其余 8 个反例逐个 PASS，最后 `自测结果：全部通过`
 ```
 
-## 这三个文件还要过闸门③（跨段一致性）
+## 这些文件还要过闸门③（跨段一致性）
 
 闸门① 只管"每段自己写得对不对"，`python scripts/check_contract.py <文件>` 另外查段与段之间对不对得上：
-两条正例与 `templates/提示词骨架.md` 都是 **0 ERROR 0 WARN**（第 9 段的步骤写了 `（对应 R#）`、
+三条正例与 `templates/提示词骨架.md` 都是 **0 ERROR 0 WARN**（第 9 段的步骤写了 `（对应 R#）`、
 第 10 段的 `未确认` 在第 11 段有对应的停下条件）。反例那边闸门③ 会打印一句范围说明
 （这份文件没有可认的第 9 段，`C2` 无从检查；段落缺失归闸门① 报 `E1`）并照常通过 —— 反例本来就不是靠闸门③ 拦的。
-CI 会拿这两个正例 + 骨架实跑一遍（见仓库根的 `.github/workflows/ci.yml`）。
+CI 会拿这三个正例 + 骨架实跑一遍（见仓库根的 `.github/workflows/ci.yml`）。
 
 ---
 
-## 例 1：从「帮我写个脚本，把下载文件夹整理一下」到 3903 字符的提示词
+## 例 1：从「帮我写个脚本，把下载文件夹整理一下」到 3923 字符的提示词
 
 **用户原话**：「帮我写个脚本，把下载文件夹整理一下。」
 
@@ -96,6 +98,22 @@ CI 会拿这两个正例 + 骨架实跑一遍（见仓库根的 `.github/workflo
 需求行本身没有数字（`W2` 看的是整条 `R#` 条目，含它的续行，但不拿配对的 `A#` 来判）。
 这是设计内的提示 —— 正例的判据是 **0 ERROR**
 （WARN 逐条说明即可，见 `references/校验清单.md`），`--selftest` 也只看 ERROR 数。
+
+---
+
+## 例 3：改造已有仓库 —— 给 logsift CLI 加 `--json` 导出
+
+**用户原话**：「logsift 那个日志分析脚本，想让它能导出 JSON 给别的脚本用，再就是出错的时候别只报一行。」
+
+例 1 / 例 2 都是「从零开始」；这一例演示**产物落在现有仓库**时怎么写：
+阶段 0 先确认仓库位置与现有约定，第 9 段按现有目录写步骤（先读 `pyproject.toml` 与既有测试、先补失败测试再改代码、
+抽 `render.py` 渲染层、`cli.py` 只做参数接线），并给出「改坏了怎么退回去」的可中断点。
+交付物全部带精确路径与行数上限，退出码写成常量，JSON 字段写成 schema —— 提示词是给陌生人看的，
+执行的人看不到这个仓库之外的上下文。
+
+跑闸门：`python scripts/check_prompt.py examples/例3-logsift-json-export.prompt.md` 与
+`python scripts/check_contract.py examples/例3-logsift-json-export.prompt.md` 都是 **0 ERROR 0 WARN**，
+并且和例 1 / 例 2 / 骨架一起进 CI 的资产闸门。
 
 ---
 

@@ -91,24 +91,27 @@ python scripts/check_prompt.py --selftest
 # PASS  例2-班级报名网站.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  反例-模糊需求.prompt.md: 16 ERROR（期望 >=5 ERROR）
 # PASS  templates/提示词骨架.md: 0 ERROR, 0 WARN（期望 0 ERROR 0 WARN）
-# …… 共 39 个用例 = 这 4 个真实文件 + 35 个内置回归（标题绑定与抢绑、模糊词豁免、
+# …… 共 68 个用例 = 这 5 个真实文件 + 63 个内置回归（标题绑定与抢绑、模糊词豁免、
 #      围栏里的 R# 样例不算条目 / 围栏里的标题不算段落 / ~~~ 也是围栏、
 #      围栏里的 TODO 仍报 E10、A# 的引用写在续行也算数、W8 同义标题歧义、
 #      豁免注释只吃同一段的 WARN / 缺理由与写错码报 E11 / --no-ignore 时豁免失效
+#      四反引号围栏不提前闭合、5 级与 setext 标题、A4 纸不算验收编号、缩进代码块不算条目、
+#      同名段不串豁免、多行豁免注释、UTF-16 BOM、代码块前的 E9 行号不漂
 #      —— 含文案断言：绑定落在没编号那条时，W8 必须说清选的是哪条）
 
 # 闸门②：检查本技能自己的定义（description 能不能被自动识别、name 会不会让技能静默失效）
 python scripts/check_skill.py --selftest
 # PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
 # PASS  [示例] good-minimal: ERROR [] WARN []（期望 ERROR [] WARN []）
-# …… 共 40 个用例 = 真实 SKILL.md + 20 个内置闸门用例 + 9 个真实示例 + 2 个引用语义
-#      + 1 个行号用例 + 7 个标记词与路径用例（`go` 不被 `good` 命中、「不接（kill）」不算写了「接」等）
+# …… 共 45 个用例（其中 2 个目录符号链接用例在没有建链接权限的环境显示 SKIP）
+#      = 真实 SKILL.md + 9 个真实示例 + 33 个内置闸门用例（含行号、BOM、长句触发、
+#      `go` 不被 `good` / `Go 语言` 命中、「不接（kill）」不算写了「接」等）
 
 # 闸门③：检查段与段之间对不对得上（需求↔步骤、未确认↔停下条件、判定↔命令）
 python scripts/check_contract.py --selftest
 # PASS  [闸门③] 基准件：闸门① 的自测夹具跨段也对得上: ERROR 码 []（期望 []） WARN 码 []（期望 []）
 # PASS  [闸门③] C1 引用了不存在的需求号: ERROR 码 ['C1']（期望 ['C1']） WARN 码 []（期望 []）
-# …… 共 10 个用例 + 1 个 --no-ignore 用例 + 2 个范围说明用例
+# …… 共 16 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例
 #      （C1/C3 是 ERROR，C2/C4/C5 是 WARN；最后两条是「没东西可查时要出范围说明」）
 
 # 变异检验：把闸门源码改坏 15 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
@@ -164,7 +167,7 @@ python scripts/check_prompt.py 输出/<slug>/prompt.md
 需求没被验收覆盖、非目标写成"无"、交付物没路径、需求段出现模糊词、残留占位符。
 全部检查项与修法见 [`references/校验清单.md`](references/校验清单.md)。
 
-- **ERROR 共 13 个码**（`E0`~`E10`，其中编号重复另算 `E2b` / `E3b`）；
+- **ERROR 共 14 个码**（`E0`~`E11`，其中编号重复另算 `E2b` / `E3b`）；
 - **WARN 另有 9 个码**（`W1`~`W9`）：全文过短、需求没有可验证对象、假设段为空、
   需求/验收条目过多、非目标只写 1 条、一句多需求、非需求段出现模糊词、
   同义标题绑定歧义。`W8` 只在这两种形态报：① 一条带编号 + 一条没编号；② 段内还有一条**级别相同**的
@@ -179,7 +182,7 @@ python scripts/check_prompt.py 输出/<slug>/prompt.md
 
 ```bash
 python scripts/check_skill.py SKILL.md
-python scripts/check_skill.py --selftest   # 40 个用例：真实的 SKILL.md 必须 0 ERROR，反例必须被拦下
+python scripts/check_skill.py --selftest   # 45 个用例（2 个符号链接用例在无建链接权限的环境显示 SKIP）
 ```
 
 查的是「自动识别」这件事能不能成立：
@@ -202,7 +205,7 @@ python scripts/check_skill.py --selftest   # 40 个用例：真实的 SKILL.md �
 
 ```bash
 python scripts/check_contract.py 输出/<slug>/prompt.md
-python scripts/check_contract.py --selftest   # 10 个用例 + 1 个 --no-ignore 用例 + 2 个范围说明用例
+python scripts/check_contract.py --selftest   # 16 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例
 ```
 
 段落本身写得对（那是闸门① 的活）不等于**段与段对得上**：
@@ -224,7 +227,7 @@ python scripts/check_contract.py --selftest   # 10 个用例 + 1 个 --no-ignore
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 里，Python 3.9 与 3.12 两头都跑一遍
 （三份 `--selftest` + `mutate_checks.py`），另外还检查三件仓库级的事：
-本仓库自己的资产（两个正例、提示词骨架、`SKILL.md`）必须过闸门、反例必须被拦下、仓库文本必须是 LF。
+本仓库自己的资产（三个正例、提示词骨架、`SKILL.md`）必须过闸门、反例必须被拦下、仓库文本必须是 LF。
 
 **0 ERROR 才允许交付**；WARN 要逐条说明为什么不影响执行。
 机器只管结构，需求对不对仍然要靠问询与人工复核 —— 闸门是拦低级错误的，不是质量保证。
@@ -245,7 +248,7 @@ prompt-forge/
 │   ├── check_skill.py    # 闸门②：检查本技能自己的定义能否被自动识别（含 --selftest）
 │   ├── check_contract.py # 闸门③：检查 12 段之间对不对得上（含 --selftest）
 │   └── mutate_checks.py  # 变异检验：把闸门源码改坏，自测必须变红
-├── examples/            # 闸门①的正反例：两个正例 + 一个反例（正例必须过闸门）
+├── examples/            # 闸门①的正反例：三个正例 + 一个反例（正例必须过闸门）
 │   └── 技能定义/         # 闸门②的正反例：1 正 8 反，预期 ERROR/WARN 码见该目录 README
 ├── 输出/                # 克隆用法下的产物目录（git 忽略）
 ```
@@ -262,7 +265,7 @@ prompt-forge/
 `mutate_checks.py` 红 → 有一处变异没被自测抓住（说明自测在那一点上是摆设，先补反例再改代码）；
 「自家资产要过闸门」红 → 仓库里的正例 / 提示词骨架 / `SKILL.md` 被改出了 ERROR；
 「反例必须被拦下」红 → 闸门漏检（`examples/反例-模糊需求.prompt.md` 现在不该通过）；
-LF 检查红 → 有文件被写成了 CRLF（`references/踩坑记录.md` 里有几条换行相关的坑）。
+LF 检查红 → 索引里有文件被写成 CRLF 或混合行尾（`git ls-files --eol` 的 `i/` 列，见 `.gitattributes`；`references/踩坑记录.md` 里有几条换行相关的坑）。
 
 **会不会把提示词写得很长很啰嗦？**
 长度由信息量决定，不是目标。经验区间：脚本类 400~900 字，Web 类 800~2000 字。

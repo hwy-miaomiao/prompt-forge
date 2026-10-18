@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import re
 import sys
 import tempfile
@@ -53,12 +55,22 @@ VAGUE_WORDS = [
 
 #: 占位符：任何段落里出现都是 ERROR。
 PLACEHOLDERS = ["TODO", "TBD", "待补充", "待填", "待定", "XXX", "???"]
+#: 占位符分两类：ASCII 词要大小写不敏感 + 词边界（`TODOs` 是英文单词，小写 `todo` 也是
+#: 没改完的证据），中文词按子串（审计 F11）。
+PLACEHOLDER_ASCII = ("TODO", "TBD", "XXX", "???")
+PLACEHOLDER_CJK = ("待补充", "待填", "待定")
+#: 文件名 / path token：`docs/TODO.md` 里的 TODO 是文件名，不是没改完的占位符（审计 F11）。
+FILE_TOKEN_RE = re.compile(r"(?<![\w])[\w./\\-]+\.[A-Za-z][A-Za-z0-9]{0,7}")
 
-#: 豁免注释：`<!-- pf-ignore: W2 这版先不做量化 -->`。
-#: 只允许豁免 WARN —— ERROR 是「不改就不能交付」，给它开后门等于闸门失效。
-IGNORE_RE = re.compile(r"<!--\s*pf-ignore\s*[:：]\s*([^>\n]*?)\s*-->")
+#: HTML 注释块（允许跨行）。`pf-ignore` 只认注释里的那一份：围栏 / 行内代码里的写法示例
+#: 不是真豁免，也不该被当成 E11 报出来（审计 F5 / F12）。
+COMMENT_RE = re.compile(r"<!--(.*?)-->", re.S)
+#: 注释内容：`pf-ignore: W2 理由`；理由可以折行，解析时拼成一句。
+IGNORE_RE = re.compile(r"^\s*pf-ignore\s*[:：]\s*(.*)$", re.S)
 IGNORE_CODES = tuple(f"W{i}" for i in range(1, 10))
-ERROR_CODES = ("E0", "E1", "E2", "E2b", "E3", "E3b", "E4", "E5", "E6", "E7", "E8", "E9", "E10")
+#: ERROR 码表同时是「pf-ignore 不能豁免谁」的判据：漏一个码，写 `pf-ignore: E11` 就会掉进
+#: 「不认识这个码」分支，得到一句与事实不符的提示（审计 P19）。
+ERROR_CODES = ("E0", "E1", "E2", "E2b", "E3", "E3b", "E4", "E5", "E6", "E7", "E8", "E9", "E10", "E11")
 #: 理由至少几个字：写「误报」算说了，写「-」「ok」不算。
 IGNORE_REASON_MIN = 4
 
@@ -101,18 +113,43 @@ REQUIRED_SECTIONS: list[tuple[str, list[str]]] = [
 #: 判据是「命中」而不是「绑定」：段别名命中过的每一条标题都要查，绑定选错了也不能有静默降级的窗口。
 ERROR_LEVEL_LABELS = ("4 需求（R#）", "7 验收标准（A#）")
 
-#: 交付物/需求里的文件路径。白名单列常见产物，白名单外的扩展名走兜底（go / gif / xml / db…），
-#: 免得仅仅因为扩展名不在表里就误报 E8。
-PATH_RE = re.compile(
-    r"[A-Za-z0-9_\-.\\/]+\.(?:md|py|js|mjs|cjs|ts|tsx|jsx|json|jsonc|txt|csv|tsv|html|css|scss|"
+#: 交付物/需求里的文件路径。判据是「路径形状」，不是「长得像扩展名」：
+#: 白名单扩展名允许裸文件名（`prompt.md`）；白名单外的扩展名（go / gif / xml / db…）必须带目录。
+#: 这样 `Next.js`、`Tailwind.css`、`example.com` 这类库名/域名不会被当成交付路径 ——
+#: 旧正则允许任意 token 撞兜底扩展名，交付物段写一句「用 Next.js 做」就能让 E8 假绿（审计 F3）。
+EXT_WHITELIST = (
+    r"md|py|js|mjs|cjs|ts|tsx|jsx|json|jsonc|txt|csv|tsv|html|css|scss|"
     r"yml|yaml|toml|ini|sh|ps1|cmd|bat|sql|xlsx|docx|pptx|pdf|png|jpg|jpeg|svg|webp|exe|zip|log|env|"
-    r"c|h|r|m|o|a|7z|"
-    r"[A-Za-z][A-Za-z0-9]{1,7})",
+    r"c|h|r|m|o|a|7z"
+)
+PATH_RE = re.compile(
+    r"(?:[A-Za-z0-9_\-.]*[\\/][A-Za-z0-9_\-.]*)\."      # 带目录的路径：扩展名走白名单 + 兜底
+    rf"(?:{EXT_WHITELIST}|[A-Za-z][A-Za-z0-9]{{1,7}})"
+    rf"|[A-Za-z0-9_\-]+\.(?:{EXT_WHITELIST})",           # 裸文件名：只认白名单扩展名
+    re.IGNORECASE,
+)
+#: 交付物/需求里先剥掉的「非路径」token：URL 与前端库名。
+#: `https://example.com/release`、`Next.js`、`Tailwind.css` 都长得像带扩展名的路径。
+URL_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.\-]*://|www\.)\S+")
+LIB_NAME_RE = re.compile(
+    r"(?<![\w./\\-])(?:node|next|nuxt|vue|react|angular|svelte|tailwind|ember|alpine|deno|bun|"
+    r"express|nest|three|jquery|webpack|vite|rollup|eslint|prettier|babel|jest|vitest)"
+    r"\.(?:js|mjs|cjs|ts|tsx|jsx|css|scss|sass|less)",
     re.IGNORECASE,
 )
 NUMBER_RE = re.compile(r"\d")
 CODE_SPAN_RE = re.compile(r"`[^`]*`")
-HEADING_RE = re.compile(r"^\s{0,3}#{1,4}\s+\S")
+#: ATX 标题：CommonMark 允许 1~6 个 `#`（审计 F15）。
+HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+#: 围栏：开栏记录字符种类与 run 长度，闭合要求同种字符且 run 不短于开栏、后面只剩空白
+#: —— 否则 ```` 围栏会被内层 ``` 提前关掉，示例里的标题/条目变成幽灵（审计 F6）。
+FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
+#: setext 标题的下划线：标题文字在上一行，`===` 是一级、`---` 是二级（`---` 也可能是
+#: 分隔线，所以 `split_sections` 只对「普通段落行」认这一种，见 `_setext_level`）。
+SETEXT_RE = re.compile(r"^\s{0,3}(=+|-+)\s*$")
+#: CommonMark 缩进代码块：4 空格或 Tab 起头。只在上一行是空行时才算（审计 F13）——
+#: 否则列表续行（2~3 空格）、表格续行、`>` 引用块都会被卷进来。
+INDENT_CODE_RE = re.compile(r"^(?: {4}|\t)")
 
 #: 段落标题的编号，两种写法都要认：
 #:   前缀式 `4 需求` / `4. 需求` / `4、需求` / `4）需求`
@@ -130,6 +167,9 @@ SECTION_NUM_RE = re.compile(
     r"|\d{1,2}\s+(?=\S))"                            # 前缀式 `4 需求`（数字 + 空白）
 )
 ITEM_STRIP_RE = re.compile(r"^[>\|\-\*\+\d\.\)\s]+")
+#: 条目编号后面紧跟这些词时，那个编号是纸张/图纸规格（`A4 纸`、`A3 幅面`），不是条目
+#: 编号 —— 旧版把它当验收 A4，凭空报 E4 + E5（审计 F7）。
+PAPER_SPEC_WORDS = ("纸", "图纸", "幅面", "幅", "开本")
 
 
 class Finding:
@@ -161,7 +201,7 @@ def strip_comments(text: str) -> str:
 
 
 def normalize_heading(raw: str) -> str:
-    text = re.sub(r"^\s{0,3}#{1,4}\s*", "", raw).strip()
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", raw).strip()
     text = strip_emphasis(text)
     text = SECTION_NUM_RE.sub("", text)  # 去掉 "5. " / "5、" 这类编号
     return text.replace(" ", "").replace("\u3000", "").replace("：", "").replace(":", "")
@@ -183,7 +223,7 @@ def heading_has_number(raw: str) -> bool:
     绑定段落时带编号的标题优先：编号是「这是正文段落」的信号，而文档标题
     （`# 任务：按下面的需求做一个…`）也会命中别名，不能让它把正文段落抢走。
     """
-    head = re.sub(r"^\s{0,3}#{1,4}\s*", "", raw).strip()
+    head = re.sub(r"^\s{0,3}#{1,6}\s*", "", raw).strip()
     return bool(SECTION_NUM_RE.match(strip_emphasis(head)))
 
 
@@ -194,7 +234,7 @@ def heading_number(raw: str) -> int | None:
     `# 3 用户需求说明` 也是一条带编号的同义标题，位置还常常更靠前，光按文档顺序
     它就会把 `## 4 需求（R#）` 的绑定抢走（审计用例 C2-h1num-above）。
     """
-    head = re.sub(r"^\s{0,3}#{1,4}\s*", "", raw).strip()
+    head = re.sub(r"^\s{0,3}#{1,6}\s*", "", raw).strip()
     match = SECTION_NUM_RE.match(strip_emphasis(head))
     if not match:
         return None
@@ -207,6 +247,11 @@ NEGATION_CHARS = "非不无"
 
 #: `判定：` 的三种取值（AGENTS.md 第 4 节）：命令 / 阈值 / 人工，三选一。
 JUDGE_KINDS = ("命令", "阈值", "人工")
+
+#: 判定方式必须是 `判定：` 后面**紧跟**三态词。纯子串匹配会被两种写法骗过：
+#: `判定：不需要人工（脚本自动跑）`、`判定方式另见下文，人工确认` —— 两者都没有有效判定，
+#: 却因为正文里出现了「人工」而通过 E5（审计 F5）。
+JUDGE_RE = re.compile(r"判定\s*[:：]\s*(命令|阈值|人工)")
 
 #: 段落里只写这些词（可带标点或括号）等于没写。
 EMPTY_CLAIMS = {"", "无", "没有", "none", "n/a", "不适用", "暂无", "略"}
@@ -224,12 +269,13 @@ def alias_hit(title: str, aliases: list[str]) -> bool:
 
 
 def judge_kind(text: str) -> str | None:
-    """返回条目里第一处「判定」之后写的三态取值；一种都没写就返回 None。"""
-    at = text.find("判定")
-    if at == -1:
-        return None
-    tail = text[at:]
-    return next((kind for kind in JUDGE_KINDS if kind in tail), None)
+    """条目里 `判定：` 后面紧跟的三态取值；没写、写成否定、或另见他处都返回 None。
+
+    旧版拿「`判定` 之后出现的第一个三态词」判：`判定：不需要人工` 因为后面有「人工」被当成
+    人工判定，`判定方式另见下文，人工确认` 也一样（审计 F5）。现在要求冒号后紧跟取值。
+    """
+    match = JUDGE_RE.search(text)
+    return match.group(1) if match else None
 
 
 def is_empty_claim(text: str) -> bool:
@@ -242,29 +288,156 @@ def is_empty_claim(text: str) -> bool:
     return cleaned.strip("（）()【】[]<>「」").lower() in EMPTY_CLAIMS
 
 
+def has_path_token(text: str) -> bool:
+    """text 里有没有真正的「路径形状」token：先剥 URL 与库名，再按 PATH_RE 找。
+
+    E8 问的是「交付物写了具体路径吗」。`https://example.com/release` 与
+    `用 Next.js 写` 都不算 —— 它们没有交付路径，却能让旧正则命中 `.com` / `.js`（审计 F3）。
+    """
+    text = URL_RE.sub(" ", text)
+    text = LIB_NAME_RE.sub(" ", text)
+    return bool(PATH_RE.search(text))
+
+
+def placeholder_hit(text: str) -> str | None:
+    """行内第一个真占位符：ASCII 词按大小写不敏感 + 词边界，中文词按子串。
+
+    `TODO` 是占位符，`TODOs` 是英文单词，`docs/TODO.md` 是文件名 —— 后两种都不算；
+    反过来小写 `todo:` 也是没改完的证据（审计 F11）。返回报告用的规范写法。
+    """
+    for token in PLACEHOLDER_ASCII:
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", text, re.I):
+            return token
+    for token in PLACEHOLDER_CJK:
+        if token in text:
+            return token
+    return None
+
+
 def fence_lines(lines: list[str]) -> list[bool]:
-    """标记每行是否在 ``` / ~~~ 围栏内 —— 围栏里的 `#` 是注释，不是标题。"""
+    """标记每行是否在 ``` / ~~~ 围栏内 —— 围栏里的 `#` 是注释，不是标题。
+
+    围栏按 CommonMark 配对：同一种字符、闭合 run 不短于开栏、闭合行后面只能有空白。
+    旧版只看前三个字符，```` 开的栏会被内层 ``` 提前关掉，示例里的标题/条目于是变成
+    幽灵标题 / 幽灵需求（审计 F6）。
+    """
     flags: list[bool] = []
-    fence: str | None = None
+    fence: tuple[str, int] | None = None
     for line in lines:
         stripped = line.strip()
-        if fence is None and stripped.startswith(("```", "~~~")):
-            fence = stripped[:3]
-        elif fence is not None and stripped.startswith(fence):
-            fence = None
-            flags.append(False)
-            continue
-        flags.append(fence is not None)
+        match = FENCE_RE.match(stripped)
+        inside = fence is not None
+        if match is not None:
+            run, rest = match.group(1), match.group(2)
+            if fence is None:
+                fence = (run[0], len(run))
+                inside = True
+            elif run[0] == fence[0] and len(run) >= fence[1] and not rest.strip():
+                fence = None
+                inside = False
+        flags.append(inside)
     return flags
 
 
-def read_text(path: Path) -> str:
-    for enc in ("utf-8-sig", "utf-8", "gbk"):
-        try:
-            return path.read_text(encoding=enc)
-        except UnicodeDecodeError:
+def indented_code_lines(lines: list[str], fenced: list[bool]) -> list[bool]:
+    """标记 CommonMark 缩进代码块（4 空格 / Tab 起头）里的行。
+
+    这类代码块没有围栏，旧版把它当正文：示例里的 `- **R9**` 变成幽灵需求（审计 F13）。
+    判定故意收窄：只有「上一行是空行 + 本行 4 空格/Tab 起头」才进代码块，一直延续到
+    第一行非空且缩进不足的正文为止。这样列表续行（2~3 空格）、表格续行、`>` 引用块
+    都不会被误跳。
+    """
+    flags: list[bool] = [False] * len(lines)
+    inside = False
+    for idx, line in enumerate(lines):
+        if fenced[idx]:
+            inside = False
             continue
-    return path.read_text(encoding="utf-8", errors="replace")
+        blank = not line.strip()
+        indented = INDENT_CODE_RE.match(line) is not None
+        if not inside:
+            prev_blank = idx == 0 or not lines[idx - 1].strip()
+            if indented and prev_blank:
+                inside = True
+        elif not blank and not indented:
+            inside = False
+        flags[idx] = inside
+    return flags
+
+
+def _setext_level(lines: list[str], idx: int) -> int | None:
+    """`lines[idx]` 是不是 setext 标题的文字行；返回标题级别（1 或 2）。"""
+    current = lines[idx]
+    if not current.strip() or idx + 1 >= len(lines):
+        return None
+    if HEADING_RE.match(current):
+        return None
+    # 列表项 / 引用 / 表格行后面跟 `---` 是分隔线，不是 setext 标题；但 `===` 不可能是
+    # 分隔线（`8. 验证方式` 下一行画 `====` 就是合法的 setext 一级标题）。
+    list_like = re.match(r"^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+|>|\|)", current)
+    underline = lines[idx + 1]
+    match = SETEXT_RE.match(underline)
+    if match is None or "|" in underline:
+        return None
+    char = match.group(1)[0]
+    if list_like is not None and char == "-":
+        return None
+    # 单个 `-` 更像列表符号/分隔线，至少两个才当二级标题下划线。
+    if len(match.group(1)) < 2:
+        return None
+    return 1 if char == "=" else 2
+
+
+class FileReadError(Exception):
+    """读文件失败（OSError）：由 report() 转成一行 `ERROR: 读不了文件…`，不抛 traceback。
+
+    退出码仍然是 1（闸门不通过），但用户看到的是一句人话，而不是 Python 堆栈
+    —— 文件被占用/没权限/路径断开都算「这一关没过」，不是脚本坏了（审计 F2）。
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"读不了文件：{path}（{reason}）")
+
+
+def split_lines(text: str) -> list[str]:
+    """只按 `\\n` 切行（先把 CRLF / CR 统一成 `\\n`）。
+
+    不用 `str.splitlines()`：它把 U+2028 / U+2029 / U+0085 也当换行。从 PDF、聊天记录里
+    粘进来的不可见字符会让行号比编辑器多出几行，报错指到别的段落（审计 F8 / 踩坑记录 #28）。
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def read_text(path: Path) -> str:
+    """按 BOM/编码回退读全文，行尾统一成 `\\n`；读不了抛 FileReadError。
+
+    顺序：UTF-16 BOM（记事本另存的 UTF-16 不能落 E0）→ utf-8-sig → utf-8 → gbk →
+    utf-8（errors=replace，最后一道兜底保证一定能读）。
+    旧版只对 UnicodeDecodeError 回退，OSError（文件被占用、没权限）会直接抛 traceback；
+    而且 UTF-16 文件会按 utf-8 读出乱码，落一个莫名其妙的 E0（审计 F2 / F17）。
+    """
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise FileReadError(path, str(exc)) from exc
+    text = ""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            text = data.decode("utf-16")
+        except UnicodeDecodeError:
+            text = ""
+    if not text:
+        for enc in ("utf-8-sig", "utf-8", "gbk"):
+            try:
+                text = data.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            text = data.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def split_sections(lines: list[str]) -> tuple[list[tuple[str, int, int, int, bool]], list[str]]:
@@ -272,16 +445,32 @@ def split_sections(lines: list[str]) -> tuple[list[tuple[str, int, int, int, boo
 
     级别和编号都要留着：文档标题（`# 任务：…`）和正文段落一样会被当成候选段落，
     而它只是一句话的名字，不该抢走任何一段的绑定（见 `check_file` 里的 E1 绑定）。
+
+    注释里的标题不是标题：整段被 `<!-- ... -->` 包住时应该报「缺少必需段落」，
+    而不是拿注释里的标题当段落（审计 F1）。**调用方负责先剥注释**：`check_file()` 用
+    `strip_comments()` 把正文行视图准备好再传进来，这里不再重复剥一遍（重复层会让变异
+    检验改掉任何一层都不变红）。
     """
     headings: list[tuple[str, int, int, bool]] = []
     fenced = fence_lines(lines)
+    indented = indented_code_lines(lines, fenced)
+    skip_underline = False
     for idx, line in enumerate(lines):
-        if fenced[idx]:
+        if skip_underline:
+            # setext 标题的下一行是下划线本身，不是新的标题文字（审计 F15）。
+            skip_underline = False
+            continue
+        if fenced[idx] or indented[idx]:
             continue
         if HEADING_RE.match(line):
             depth = line.lstrip()
             headings.append((normalize_heading(line), len(depth) - len(depth.lstrip("#")), idx,
                              heading_has_number(line)))
+            continue
+        level = _setext_level(lines, idx)
+        if level is not None:
+            headings.append((normalize_heading(line), level, idx, heading_has_number(line)))
+            skip_underline = True
     sections: list[tuple[str, int, int, int, bool]] = []
     for i, (title, level, start, numbered) in enumerate(headings):
         end = headings[i + 1][2] if i + 1 < len(headings) else len(lines)
@@ -291,15 +480,35 @@ def split_sections(lines: list[str]) -> tuple[list[tuple[str, int, int, int, boo
 
 
 def body_of(lines: list[str], start: int, end: int) -> str:
+    """段落正文（不含标题行）；`lines` 必须已经剥过注释（见 `check_file` 的两套行视图）。
+
+    注释不是正文：拿注释里写的段落标题/条目当内容，会让「整段被注释掉」的文档一路绿灯
+    （审计 F1）。`check_file()` 统一剥注释（用等量换行替换，行号仍对得上），这里直接切行。
+    """
     return "\n".join(lines[start + 1 : end])
 
 
 def item_start(text: str, letter: str) -> int | None:
-    # 引用块写法 `> **R1** …` 与列表写法 `- **R1** …` 都要认出来：条目本身是什么形式
-    # 不影响编号的收集，把 `>` 和 `*` 一起剥掉再找编号。
-    probe = ITEM_STRIP_RE.sub("", text.strip()).lstrip(">*`").lstrip()
-    match = re.match(rf"{letter}(\d+)(?!\d)", probe)
-    return int(match.group(1)) if match else None
+    """这一行是不是 `R1` / `A2` 条目，是则返回编号；不是返回 None。
+
+    四种写法都要认（`examples/` 与 `templates/` 里都在用）：列表加粗 `- **R1** …`、
+    引用块 `> **R1** …`、纯文本 `R1：…` / `R1. …`、表格单列 `| A1 | … |`。
+
+    旧版剥掉列表符号后只要 `R`/`A` 加数字开头就算条目，`A4 纸` 于是变成验收 A4，
+    凭空造出 E4/E5/E6（审计 F7）。现在两条收窄：编号后不能紧跟字母/数字（`R2D2` 不算），
+    表格外的「A4 纸 / A3 图纸 / A4 幅面」这类纸张规格不算。
+    """
+    stripped = text.strip()
+    probe = ITEM_STRIP_RE.sub("", stripped).lstrip(">*`").lstrip()
+    bold = re.match(rf"(?:\*\*|__){letter}\d+(?:\*\*|__)", probe) is not None
+    match = re.match(rf"(?:\*\*|__)?{letter}(\d+)(?:\*\*|__)?(?![\dA-Za-z_])", probe)
+    if match is None:
+        return None
+    if not bold:
+        rest = probe[match.end():].lstrip()
+        if any(rest.startswith(word) for word in PAPER_SPEC_WORDS):
+            return None
+    return int(match.group(1))
 
 
 def _strip_cited(text: str) -> str:
@@ -365,14 +574,18 @@ def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], 
     """扫全文收集 `R1` / `A2` 开头的条目。
 
     返回 ({编号: 条目正文行}, [(编号, 行号), ...] 重复编号)。条目块在遇到下一条目或下一个标题时结束。
+    `lines` 必须已经剥过注释：`<!-- - **R9** 旧版草稿 -->` 不能变成「幽灵需求」逼出 E6
+    （审计 F1）。剥注释在 `check_file()` 统一做，这里不再重复。
     """
     starts: list[tuple[int, int]] = []
     fenced = fence_lines(lines)
+    indented = indented_code_lines(lines, fenced)
     for idx, line in enumerate(lines):
         # 围栏里的 `- **R9** 这里只是写法示例` 是**引用的样例**，不是作者的条目：与 `split_sections`
         # （会跳过围栏内的标题）保持同一口径。不跳过就有两个方向的错：围栏示例变成「幽灵需求」
-        # 逼出 E6，或者整份文档的条目全写在围栏里却一路绿灯（审计 BUG-B）。
-        if fenced[idx]:
+        # 逼出 E6，或者整份文档的条目全写在围栏里却一路绿灯（审计 BUG-B）。缩进代码块同理
+        # （4 空格 / Tab 起的示例不是条目，审计 F13）。
+        if fenced[idx] or indented[idx]:
             continue
         num = item_start(line, letter)
         if num is not None:
@@ -388,7 +601,7 @@ def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], 
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
         block: list[str] = []
         for j in range(idx, end):
-            if j != idx and not fenced[j] and HEADING_RE.match(lines[j]):
+            if j != idx and not fenced[j] and not indented[j] and HEADING_RE.match(lines[j]):
                 break
             block.append(lines[j])
         items.setdefault(num, []).extend(block)
@@ -399,8 +612,14 @@ def check_file(path: Path, use_ignore: bool = True,
                suppressed: list[tuple[Finding, str]] | None = None) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
     raw = read_text(path)
-    lines = raw.splitlines()
+    # 两套行视图，行号一一对应（strip_comments 用等量换行替换注释）：
+    #   text_lines —— 原文：E10 占位符要查注释里/围栏里的残留，pf-ignore 注释本身也是注释；
+    #   lines      —— 正文：段落、条目、路径、模糊词都只看它，注释里的东西一律不算（审计 F1）。
+    text_lines = split_lines(raw)
+    lines = split_lines(strip_comments(raw))
     fenced = fence_lines(lines)
+    #: 缩进代码块（4 空格 / Tab，没有围栏）：示例里的条目/标题同样不算正文（审计 F13）。
+    indented = indented_code_lines(lines, fenced)
 
     sections, _preamble = split_sections(lines)
     if not sections:
@@ -408,9 +627,17 @@ def check_file(path: Path, use_ignore: bool = True,
         return findings, len(raw)
 
     #: 豁免注释：`<!-- pf-ignore: W2 理由 -->`。只对 WARN 生效，写法问题报 E11（见 parse_ignores）。
-    ignores, ignore_problems = parse_ignores(lines)
+    #: 用原文行扫：注释本身在正文视图里已经被剥掉了。
+    ignores, ignore_problems = parse_ignores(text_lines, fenced=fenced)
     where = section_index(lines, sections)
     findings.extend(ignore_problems)
+
+    def _item_line(letter: str, num: int) -> int:
+        """条目所在的行号（1 基）；找不到返回 0 —— E4/E5/E6 靠它把误报定位到具体条目。"""
+        for i, ln in enumerate(lines):
+            if not fenced[i] and not indented[i] and item_start(ln, letter) == num:
+                return i + 1
+        return 0
 
     # ---- E1 必需段落 -------------------------------------------------------
     # 绑定必须**优先**选带编号的标题，否则文档标题会把段落抢走：
@@ -449,7 +676,7 @@ def check_file(path: Path, use_ignore: bool = True,
             # 段里有没有本段自己的条目（`R#` / `A#`）：绑错段落等于那段没被查，
             # 所以「这段里真有条目」比「谁写在更前面」更有说服力（审计用例 C1-hijack-h2sub）。
             has_items = bool(item_letter) and any(
-                not fenced[j] and item_start(lines[j], item_letter) is not None
+                not fenced[j] and not indented[j] and item_start(lines[j], item_letter) is not None
                 for j in range(start + 1, end)
             )
             candidates.append((i, title, level, numbered,
@@ -557,14 +784,17 @@ def check_file(path: Path, use_ignore: bool = True,
         # 「对应/覆盖/…」后面的、以及带这些关键词的括号段。正文里顺带提一句别的 R# 不算覆盖。
         refs = declared_refs(block, num)
         if not refs:
-            findings.append(Finding("ERROR", "E4", f"验收 A{num} 没有引用任何需求编号（应写「对应 R1」）"))
+            findings.append(Finding("ERROR", "E4", f"验收 A{num} 没有引用任何需求编号（应写「对应 R1」）",
+                                    _item_line("A", num)))
         referenced |= refs
         if judge_kind(text) is None:
             findings.append(
-                Finding("ERROR", "E5", f"验收 A{num} 没有 `判定：`，或没写判定方式（命令 / 阈值 / 人工 三者之一）")
+                Finding("ERROR", "E5", f"验收 A{num} 没有 `判定：`，或没写判定方式（命令 / 阈值 / 人工 三者之一）",
+                        _item_line("A", num))
             )
     for num in sorted(set(requirements) - referenced):
-        findings.append(Finding("ERROR", "E6", f"需求 R{num} 没有任何验收条目覆盖它"))
+        findings.append(Finding("ERROR", "E6", f"需求 R{num} 没有任何验收条目覆盖它",
+                                _item_line("R", num)))
 
     # ---- E7 非目标 ---------------------------------------------------------
     goal_label = "5 非目标"
@@ -573,8 +803,8 @@ def check_file(path: Path, use_ignore: bool = True,
         body = body_of(lines, start, end)
         if is_empty_claim(body):
             findings.append(Finding("ERROR", "E7", "非目标段落为空或只写了「无」；至少写 1 条不做的事"))
-        elif len([ln for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("|")]) < 2 \
-                and len([ln for ln in body.splitlines() if ln.strip()]) < 2:
+        elif len([ln for ln in split_lines(body) if ln.strip() and not ln.strip().startswith("|")]) < 2 \
+                and len([ln for ln in split_lines(body) if ln.strip()]) < 2:
             findings.append(Finding("WARN", "W6", "非目标只写了 1 条，建议补到 2 条以上"))
 
     # ---- E8 交付物路径 -----------------------------------------------------
@@ -582,54 +812,85 @@ def check_file(path: Path, use_ignore: bool = True,
     if deliv_label in matched:
         start, end = matched[deliv_label]
         body = body_of(lines, start, end)
-        if not PATH_RE.search(body):
+        if not has_path_token(body):
             findings.append(
                 Finding("ERROR", "E8", "交付物段落里没有任何带扩展名的路径（如 `out/report.csv`）")
             )
         _flag_vague(findings, "交付物", body, start, "WARN")
 
     # ---- E9 模糊词 ---------------------------------------------------------
+    def _section_pos(start: int) -> int | None:
+        for i, (_title, _level, s, _end, _numbered) in enumerate(sections):
+            if s == start:
+                return i
+        return None
+
+    def _with_subtree(start: int, end: int) -> tuple[int, int]:
+        """绑定段 + 它下面的子标题子树。
+
+        `### 输出` 这种子标题里的模糊词也属于需求/验收段：旧版只查绑定段自己的正文，
+        子标题内容降级成 W9，等于给 A# 的模糊词留了一条静默通道（审计 F16）。
+        只往下扩到「级别比绑定段更深」的连续标题，不做全局扩散。
+        """
+        pos = _section_pos(start)
+        if pos is None:
+            return start, end
+        level = sections[pos][1]
+        last = pos
+        while last + 1 < len(sections) and sections[last + 1][1] > level:
+            last += 1
+        return start, sections[last][3]
+
     # 用段落的实际行号区间做去重键：标题字数由使用者决定（`## 4. 需求（R#）` 或 `## 需求（R#）` 都合法），
     # 拿 label 字符串比对会在不编号的标题上失配，同一段就会被 E9 和 W9 各报一次。
     checked: set[tuple[int, int]] = set()
+    #: E9 查过的行区间（含子树）：W9 兜底循环必须跳过这些行，否则子树里的模糊词又被报一遍。
+    error_spans: list[tuple[int, int]] = []
     for label in ERROR_LEVEL_LABELS:
         ranges = list(suspects.get(label, ()))
         bound = matched.get(label)
         if bound is not None and bound not in ranges:
             ranges.insert(0, bound)
+        bound_span = _with_subtree(bound[0], bound[1]) if bound is not None else None
         for start, end in ranges:
-            if (start, end) in checked:
+            if bound_span is not None and (start, end) != bound and \
+                    bound_span[0] <= start and end <= bound_span[1]:
+                # 命中别名的标题就在绑定段的子树里（`### 输出验收`）：子树已经按 ERROR 查过，
+                # 再按另一条标题查一遍会对同一行报两条 E9（审计 F16 的 37b 夹具）。
+                continue
+            span = bound_span if bound_span is not None and (start, end) == bound else (start, end)
+            if span in checked:
                 continue  # 同一条标题被两个别名命中时只查一遍
-            checked.add((start, end))
+            checked.add(span)
+            error_spans.append(span)
             if bound is not None and (start, end) != bound:
                 # 这一段只是标题**命中**了别名，不是最后绑定的那一段（比如 `## 需求变更由谁说了算`）。
                 # 报出来时点名它自己的标题：否则用户跑到行号那一看是别的标题，会以为闸门指错了地方。
                 shown = display_heading(lines[start]) or label.split(" ", 1)[1]
             else:
                 shown = label.split(" ", 1)[1]
-            _flag_vague(findings, shown, body_of(lines, start, end), start, "ERROR")
+            _flag_vague(findings, shown, body_of(lines, span[0], span[1]), start, "ERROR")
 
     for i, (title, _level, start, end, _numbered) in enumerate(sections):
-        if (start, end) in checked:
-            continue  # 这两段已由 E9 按 ERROR 查过，不要再报一遍 W9
+        if any(s <= start and end <= e for s, e in error_spans):
+            continue  # 这一段已由 E9 按 ERROR 查过（含绑定段的子树），不要再报一遍 W9
         _flag_vague(findings, title, body_of(lines, start, end), start, "WARN")
 
     # ---- E10 占位符 --------------------------------------------------------
-    for idx, line in enumerate(lines, start=1):
-        for token in PLACEHOLDERS:
-            if token in line:
-                findings.append(Finding("ERROR", "E10", f"残留占位符 `{token}`", idx))
-                break
+    # 用原文行：占位符写在哪里都算残留（注释里、围栏里都是没改完的证据）。
+    # 但「占位符」是词不是子串：`docs/TODO.md` 是文件名、`TODOs` 是英文单词，都不能算；
+    # 反过来小写 `todo` 也是没改完的证据，要抓（审计 F11）。
+    for idx, line in enumerate(text_lines, start=1):
+        probe = CODE_SPAN_RE.sub("", line)
+        probe = URL_RE.sub(" ", probe)
+        probe = FILE_TOKEN_RE.sub(" ", probe)
+        token = placeholder_hit(probe)
+        if token is not None:
+            findings.append(Finding("ERROR", "E10", f"残留占位符 `{token}`", idx))
 
     # ---- 其余警告 ----------------------------------------------------------
     # 行号不是装饰：`pf-ignore` 的作用域按「注释与被豁免的 WARN 在同一段」判，
     # 所以这几条也得说清自己在哪一段（拿段落标题行当锚点）。
-    def _item_line(letter: str, num: int) -> int:
-        for i, ln in enumerate(lines):
-            if not fenced[i] and item_start(ln, letter) == num:
-                return i + 1
-        return 0
-
     def _section_line(label: str) -> int:
         span = matched.get(label)
         return span[0] + 1 if span else 0
@@ -644,14 +905,15 @@ def check_file(path: Path, use_ignore: bool = True,
                                 _section_line("4 需求（R#）")))
 
     for num, block in sorted(requirements.items()):
+        # requirements 是 collect_items 在**已剥注释**的行上收集的（见 check_file 的两套行视图），
+        # 所以这里不用再剥一次；注释里的数字不会混进来骗过下面的 NUMBER_RE。
         text = "\n".join(block)
         line_no = _item_line("R", num)
         # 只看标记（`- **R9**`）之后的正文：标记里的编号是数字，会骗过下面的 NUMBER_RE。
-        # 注释也剥掉：`<!-- pf-ignore: W2 … -->` 里的 `2` 同样会骗过它（见 strip_comments）。
-        body = strip_comments(item_body(text))
+        body = item_body(text)
         # 代码段（`openpyxl`）本身就是「具体对象」，所以有代码段时照样豁免。
         joined = CODE_SPAN_RE.sub("", body)
-        if not NUMBER_RE.search(joined) and not PATH_RE.search(joined) and "`" not in body:
+        if not NUMBER_RE.search(joined) and not has_path_token(joined) and "`" not in body:
             findings.append(
                 Finding(
                     "WARN",
@@ -684,13 +946,23 @@ def check_file(path: Path, use_ignore: bool = True,
 
 
 def _flag_vague(findings: list[Finding], label: str, body: str, start: int, level: str) -> None:
-    clean = CODE_SPAN_RE.sub("", strip_comments(body))
-    for idx, line in enumerate(clean.splitlines()):
-        if line.strip().startswith("#"):
-            continue  # 标题行是段落名本身，不算内容
-        probe = _strip_cited(line)
+    """段落内的模糊词：逐行扫，行号按原段落偏移算。
+
+    旧版先对整段做 `CODE_SPAN_RE.sub("", ...)` 再切行：行内代码一旦跨行，换行就被删掉，
+    后面的行号整体前移（同一句话 E9 报第 22 行、W2 报第 24 行，审计 F9）。现在逐行剥
+    行内代码，行数不变；围栏里的行跳过 —— 围栏里的示例不是作者的话（审计 31-fence-vague）。
+    """
+    body_lines = split_lines(strip_comments(body))
+    # 只按 \n 切行：splitlines() 会把 U+2028 之类当换行，行号整体漂移（审计 F8）。
+    fenced = fence_lines(body_lines)
+    for idx, line in enumerate(body_lines):
+        if fenced[idx]:
+            continue
+        probe = _strip_cited(CODE_SPAN_RE.sub("", line))
         if not probe:
             continue  # 空行，或整行都是引文（`> [用户原话]「…」`）：引用原文里的词不算你的锅
+        if probe.startswith("#"):
+            continue  # 标题行是段落名本身，不算内容
         for word in VAGUE_WORDS:
             if word in probe:
                 findings.append(
@@ -700,75 +972,105 @@ def _flag_vague(findings: list[Finding], label: str, body: str, start: int, leve
                 break
 
 
-def parse_ignores(lines: list[str], codes: tuple[str, ...] = IGNORE_CODES) -> tuple[list[tuple[int, str, str]], list[Finding]]:
+def parse_ignores(lines: list[str], codes: tuple[str, ...] = IGNORE_CODES,
+                  fenced: list[bool] | None = None,
+                  error_codes: tuple[str, ...] = ERROR_CODES) -> tuple[list[tuple[int, str, str]], list[Finding]]:
     """收集 `<!-- pf-ignore: W2 为什么这条可以忽略 -->`。
 
     返回 `([(注释所在行的 0 基下标, 码, 理由)], [写法有问题的 Finding])`。
     写法问题一律 ERROR（E11）：豁免是「我知道这条 WARN 在说什么、为什么它不影响执行」的声明，
     不是关闸门的开关。所以缺码、缺理由、码不认识、或者想豁免 ERROR，都在这里被拦下。
 
-    `codes` 是「本闸门能豁免的码」：闸门① 只认自己的 `W1…W9`；闸门③ 传 `W1…W9 + C1…C5`，
+    `codes` 是「本闸门能豁免的码」：闸门① 只认自己的 `W1…W9`；闸门③ 传 `W1…W9 + C2/C4/C5`，
     这样 `<!-- pf-ignore: C2 … -->` 在闸门③ 里算数、在闸门① 里会老老实实报「不认识这个码」。
+    `error_codes` 是「本闸门里属于 ERROR、不能豁免的码」：默认就是 `ERROR_CODES`；闸门③ 把
+    `C1`/`C3` 也传进来，于是 `pf-ignore: C1` 明确报「是 ERROR」而不是「不认识」（审计 P31/P32）。
+
+    只认**注释块**里的写法：围栏 / 行内代码里的 `pf-ignore` 是写法示例，既不豁免任何东西，
+    也不该逼出一条假 E11（审计 F5）。注释块允许跨行，理由按空白拼成一句（审计 F12）。
     """
     ignores: list[tuple[int, str, str]] = []
     problems: list[Finding] = []
-    for idx, line in enumerate(lines):
-        for m in IGNORE_RE.finditer(line):
-            body = m.group(1).strip()
-            hit = re.match(r"^([A-Za-z]\d+[a-z]?)\s*(.*)$", body)
-            if not hit:
-                problems.append(
-                    Finding("ERROR", "E11",
-                            "`pf-ignore` 没写码（写法：`<!-- pf-ignore: W2 为什么这条可以忽略 -->`）",
-                            idx + 1)
-                )
-                continue
-            code = hit.group(1).upper()
-            reason = hit.group(2).strip()
-            if code in ERROR_CODES:
-                problems.append(
-                    Finding("ERROR", "E11",
-                            f"`pf-ignore: {code}` 无效：豁免只对 WARN 生效，{code} 是 ERROR，"
-                            "必须改掉才算过闸门", idx + 1)
-                )
-                continue
-            if code not in codes:
-                problems.append(
-                    Finding("ERROR", "E11",
-                            f"`pf-ignore: {code}` 不认识这个码（本闸门可豁免的只有 {codes_hint(codes)}）",
-                            idx + 1)
-                )
-                continue
-            if len(reason) < IGNORE_REASON_MIN:
-                problems.append(
-                    Finding("ERROR", "E11",
-                            f"`pf-ignore: {code}` 必须写理由（至少 {IGNORE_REASON_MIN} 个字）："
-                            "下一个人要靠它判断这是有意的取舍还是漏改", idx + 1)
-                )
-                continue
-            ignores.append((idx, code, reason))
+    text = "\n".join(lines)
+    if fenced is None:
+        fenced = fence_lines(lines)
+    for m in COMMENT_RE.finditer(text):
+        body = m.group(1)
+        if "pf-ignore" not in body:
+            continue
+        idx = text.count("\n", 0, m.start())
+        if idx < len(fenced) and fenced[idx]:
+            continue  # 围栏里的示例不是真豁免
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        if lines[idx][: m.start() - line_start].count("`") % 2 == 1:
+            continue  # 行内代码里的示例不是真豁免
+        hit = IGNORE_RE.match(body.strip())
+        if not hit:
+            problems.append(
+                Finding("ERROR", "E11",
+                        "`pf-ignore` 没写码（写法：`<!-- pf-ignore: W2 为什么这条可以忽略 -->`）",
+                        idx + 1)
+            )
+            continue
+        code_hit = re.match(r"^([A-Za-z]\d+[a-z]?)\s*(.*)$", hit.group(1).strip(), re.S)
+        if not code_hit:
+            problems.append(
+                Finding("ERROR", "E11",
+                        "`pf-ignore` 没写码（写法：`<!-- pf-ignore: W2 为什么这条可以忽略 -->`）",
+                        idx + 1)
+            )
+            continue
+        code = code_hit.group(1).upper()
+        # 跨行注释的理由可能被排版折成几行：拼成一句再判长度，不静默丢弃（审计 F12）。
+        reason = " ".join(code_hit.group(2).split())
+        if code in error_codes:
+            problems.append(
+                Finding("ERROR", "E11",
+                        f"`pf-ignore: {code}` 无效：豁免只对 WARN 生效，{code} 是 ERROR，"
+                        "必须改掉才算过闸门", idx + 1)
+            )
+            continue
+        if code not in codes:
+            problems.append(
+                Finding("ERROR", "E11",
+                        f"`pf-ignore: {code}` 不认识这个码（本闸门可豁免的只有 {codes_hint(codes)}）",
+                        idx + 1)
+            )
+            continue
+        if len(reason) < IGNORE_REASON_MIN:
+            problems.append(
+                Finding("ERROR", "E11",
+                        f"`pf-ignore: {code}` 必须写理由（至少 {IGNORE_REASON_MIN} 个字）："
+                        "下一个人要靠它判断这是有意的取舍还是漏改", idx + 1)
+            )
+            continue
+        ignores.append((idx, code, reason))
     return ignores, problems
 
 
-def section_index(lines: list[str], sections: list[tuple[str, int, int, int, bool]]) -> dict[int, str]:
-    """行号（0 基）-> 段落名。豁免注释的作用域判据：注释与被豁免的 WARN 得在同一段。"""
-    where: dict[int, str] = {}
-    for title, _level, start, end, _numbered in sections:
+def section_index(lines: list[str], sections: list[tuple[str, int, int, int, bool]]) -> dict[int, tuple[int, int]]:
+    """行号（0 基）-> 段落区间 `(起始行, 结束行)`。
+
+    用区间而不是标题字符串：两个同名段（`## 备注` 出现两次）会共享同一个标题名，旧版
+    于是让一条豁免注释跨段生效（审计 F10）。区间唯一，同名段也互不串。
+    """
+    where: dict[int, tuple[int, int]] = {}
+    for _title, _level, start, end, _numbered in sections:
         for idx in range(max(start, 0), min(end, len(lines))):
-            where.setdefault(idx, title)
+            where.setdefault(idx, (start, end))
     return where
 
 
 def apply_ignores(
     findings: list[Finding],
     ignores: list[tuple[int, str, str]],
-    where: dict[int, str],
+    where: dict[int, tuple[int, int]],
 ) -> tuple[list[Finding], list[tuple[Finding, str]]]:
     """按注释豁免 WARN，返回 `(留下的 findings, [(被豁免的 finding, 理由)])`。
 
     作用域：注释与它要豁免的 WARN 在**同一段**里才算数（把 `pf-ignore: W2` 写在别处，
-    下一个人看到那条 WARN 时根本不知道有人处理过）。不带行号的检查（W1 全文长度）是文件级，
-    写在哪儿都算 —— 它说的就是整份文件。
+    下一个人看到那条 WARN 时根本不知道有人处理过）。段落按行号区间判，同名段不会串。
+    不带行号的检查（W1 全文长度）是文件级，写在哪儿都算 —— 它说的就是整份文件。
     """
     kept: list[Finding] = []
     dropped: list[tuple[Finding, str]] = []
@@ -782,7 +1084,8 @@ def apply_ignores(
                     reason = why
                     break
                 here = where.get(f.line - 1)
-                if here is not None and here == where.get(idx):
+                target = where.get(idx)
+                if here is not None and target is not None and here == target:
                     reason = why
                     break
         if reason is None:
@@ -794,7 +1097,14 @@ def apply_ignores(
 
 def report(path: Path, use_ignore: bool = True) -> int:
     suppressed: list[tuple[Finding, str]] = []
-    findings, size = check_file(path, use_ignore=use_ignore, suppressed=suppressed)
+    try:
+        findings, size = check_file(path, use_ignore=use_ignore, suppressed=suppressed)
+    except FileReadError as exc:
+        # 读不了文件也是「这一关没过」：打印一行 ERROR 而不是 Python 堆栈（审计 F2）。
+        print(f"\n=== 检查 {path} ===")
+        print(f"ERROR: {exc}")
+        print("结果：1 ERROR, 0 WARN —— 未通过")
+        return 1
     errors = [f for f in findings if f.level == "ERROR"]
     warns = [f for f in findings if f.level == "WARN"]
     print(f"\n=== 检查 {path} （{size} 字符） ===")
@@ -1099,6 +1409,116 @@ def selftest() -> int:
          lambda: sub(from_clean(), "## 4. 需求（R#）",
                      "## 4. 需求（R#）\n\n（本节先留空，条目写在下面那条标题下。）\n\n## 需求清单"),
          set(), {"W8"}, "本次绑定用了没编号的「需求清单」"),
+        # ---- 注释 / 路径 / 判定 / 不可见字符（审计 F1–F8）----------------------
+        # 整段被 HTML 注释包住 = 这段没写：注释里的标题不是标题，必须报缺段（审计 F1）。
+        ("注释里的标题不算段落",
+         lambda: sub(sub(from_clean(), "## 5. 非目标", "<!--\n## 5. 非目标"),
+                     "- 不接数据库，不写定时任务。", "- 不接数据库，不写定时任务。\n-->"),
+         {"E1"}),
+        # 注释里的 `R#` 不是条目：多行注释里的整条需求不能变成「幽灵需求」逼出 E6（审计 F1）。
+        ("注释里的需求不算条目",
+         lambda: sub(from_clean(), "- **R1** 读取",
+                     "<!--\n- **R9** 旧版草稿\n-->\n- **R1** 读取"),
+         set()),
+        # 注释里的数字也不算需求正文：`<!-- 参考 2024 版说明 -->` 不该把 W2 顶掉（审计 F1 的注释口径）。
+        ("注释里的数字不算需求正文",
+         lambda: sub(with_plain_r3(), plain_r3_new,
+                     plain_r3_new + "\n  <!-- 参考 2024 版说明 -->"),
+         set(), {"W2"}),
+        # 交付物里只写 URL：URL 不是交付路径，E8 必须报（旧版命中 `.com` 假绿，审计 F3）。
+        ("交付物只有 URL 报 E8",
+         lambda: sub(from_clean(),
+                     "| out/borrow.csv | UTF-8，只输出本周新增行 | 1 个 |",
+                     "| 见 https://example.com/release | 网页说明 | 1 个 |"),
+         {"E8"}),
+        # 库名 `Next.js` / `Tailwind.css` 也不是交付路径（旧版命中 `.js` / `.css` 假绿，审计 F3）。
+        ("交付物只有库名报 E8",
+         lambda: sub(from_clean(),
+                     "| out/borrow.csv | UTF-8，只输出本周新增行 | 1 个 |",
+                     "| 用 Next.js 做页面，样式参考 Tailwind.css | 网页 | 1 个 |"),
+         {"E8"}),
+        # `判定：` 后面写否定式不算判定（旧版纯子串匹配：看到「人工」就当人工判定，审计 F5）。
+        ("判定写成否定式报 E5",
+         lambda: sub(from_clean(), "判定：人工 看 main 分支。", "判定：不需要人工，脚本自动跑。"),
+         {"E5"}),
+        # `判定方式另见下文，人工确认`：没有紧跟三态取值，也不算判定（同上）。
+        ("判定另见他处报 E5",
+         lambda: sub(from_clean(), "判定：人工 看 main 分支。", "判定方式另见下文，人工确认。"),
+         {"E5"}),
+        # U+2028 不是换行符：粘进正文的不可见分隔符不能凭空造出一个标题（审计 F8）。
+        ("U+2028 不造幽灵标题",
+         lambda: sub(from_clean(), "## 4. 需求（R#）\n",
+                     "## 4. 需求（R#）\u2028## 需求变更由谁说了算\n"),
+         set(), set()),
+        # ---- 围栏 / 条目 / 编号 / 占位符（审计 F5–F15）------------------------
+        # 围栏里的 `pf-ignore` 只是写法示例：不能关掉正文里真该报的 W2（审计 F5）。
+        # 用 `~~~` 围栏：R3 条目正文里若有反引号，W2 本来就有「引了代码不算没量化」的豁免口径。
+        ("围栏里的豁免注释不生效",
+         lambda: sub(with_plain_r3(), plain_r3_new,
+                     plain_r3_new + "\n\n~~~markdown\n<!-- pf-ignore: W2 围栏里的示例 -->\n~~~"),
+         set(), {"W2"}, "", set()),
+        # 行内代码里的豁免注释同理：它既不能免除 WARN，也不能反而报 E11（审计 F5）。
+        ("行内代码里的豁免注释示例不报 E11",
+         lambda: sub(from_clean(), "## 6. 技术约束",
+                     "## 6. 技术约束\n\n写法示范：`<!-- pf-ignore: W99 理由 -->`\n\n这段说明要好看。"),
+         set(), {"W9"}),
+        # 围栏里的错码/错写法示例也不该报 E11：示例不是给这份文档写的豁免（审计 F5）。
+        ("围栏里的坏码示例不报 E11",
+         lambda: sub(from_clean(), "## 6. 技术约束",
+                     "## 6. 技术约束\n\n~~~text\n<!-- pf-ignore: W99 随便 -->\n~~~\n\n这段说明要好看。"),
+         set(), {"W9"}),
+        # 四个反引号的围栏不能被内层三个反引号提前关闭：示例里的 R9 不能变幽灵需求（审计 F6）。
+        ("四个反引号围栏不被内层三反引号关闭",
+         lambda: sub(from_clean(), "## 5. 非目标",
+                     "````markdown\n```text\n- **R9** 这里只是写法示例\n```\n````\n\n## 5. 非目标"),
+         set()),
+        # 「A4 纸」是纸张规格不是验收条目 A4：不能逼出假 E4/E5（审计 F7）。
+        ("A4 纸不是验收编号",
+         lambda: sub(from_clean(), "- **A1（对应 R1）**", "- A4 纸打印，双面。\n- **A1（对应 R1）**"),
+         set()),
+        # 围栏里的模糊词是示例文本，不算文档正文（与反引号豁免同口径，审计 F9 的反面）。
+        ("围栏里的模糊词不报",
+         lambda: sub(from_clean(), "## 6. 技术约束", "## 6. 技术约束\n```text\n界面要美观\n```"),
+         set()),
+        # 同名段落不能共享豁免作用域：第一个「备注」里的 pf-ignore 不能吃掉第二个的风险（审计 F10）。
+        ("同名段落不串豁免",
+         lambda: sub(from_clean(), "## 5. 非目标",
+                     "## 备注\n\n<!-- pf-ignore: W9 这段先留着 -->\n\n## 备注\n\n这段说明要好看。\n\n## 5. 非目标"),
+         set(), {"W9"}, "", set()),
+        # `docs/TODO.md` 是文件名，不是残留占位符（审计 F11）。
+        ("文件名 TODO.md 不算占位符",
+         lambda: sub(from_clean(), "| out/borrow.csv | UTF-8，只输出本周新增行 | 1 个 |",
+                     "| docs/TODO.md | 待办清单 | 1 个 |"),
+         set()),
+        # 小写 `todo` 同样是没改完的证据，要按占位符报出来（审计 F11 的漏检侧）。
+        ("小写 todo 也要报 E10",
+         lambda: sub(from_clean(), "## 6. 技术约束", "## 6. 技术约束\ntodo: 等用户补"),
+         {"E10"}),
+        # 多行 `pf-ignore` 是合法写法：理由换行写到下一行也要生效，不能静默失效（审计 F12）。
+        ("多行豁免注释生效",
+         lambda: sub(with_plain_r3(), plain_r3_new,
+                     plain_r3_new + "\n<!-- pf-ignore: W2\n这版先不做量化 -->"),
+         set(), set(), "", {"W2"}),
+        # 缩进代码块里的条目是示例：不能变幽灵需求逼出 E6（审计 F13）。
+        ("缩进代码块里的条目不算需求",
+         lambda: sub(from_clean(), "## 4. 需求（R#）\n",
+                     "## 4. 需求（R#）\n\n    示例：- **R9** 这里只是说明\n\n"),
+         set()),
+        # 5 级标题也必须是标题：不能因为级别深就判「缺少第 8 段」（审计 F15）。
+        ("5 级标题也算标题",
+         lambda: sub(from_clean(), "## 8. 验证方式", "##### 8. 验证方式"),
+         set()),
+        # setext 标题同样是标题（`8 验证方式` 下一行画线），不能被当成正文（审计 F15）。
+        ("setext 标题也算标题",
+         lambda: sub(from_clean(), "## 8. 验证方式", "8 验证方式\n--------"),
+         set()),
+        # 绑定段下面的子标题（`### 输出`）里的模糊词属于验收内容：必须按 E9 报，不能降级成 W9（审计 F16）。
+        ("验收段子标题里的模糊词按 E9 报",
+         lambda: sub(from_clean(),
+                     "- **A3（对应 R3）** 入口与退出码符合要求。判定：人工 看 main 分支。",
+                     "- **A3（对应 R3）** 入口与退出码符合要求。判定：人工 看 main 分支。\n\n"
+                     "### 输出\n\n验收时界面要美观。"),
+         {"E9"}, set()),
         # ---- 豁免注释 --------------------------------------------------------
         # 同段的 `pf-ignore` 吃掉这条 WARN，并如实报告「豁免了什么、理由是什么」。
         ("豁免注释：同段的 W2 被吃掉",
@@ -1121,6 +1541,11 @@ def selftest() -> int:
         ("豁免注释：码不认识报 E11",
          lambda: sub(with_plain_r3(), plain_r3_new, plain_r3_new + "\n<!-- pf-ignore: W99 随便 -->"),
          {"E11"}, {"W2"}, "", set()),
+        # ERROR 码表必须含 E11 自己：否则写 `pf-ignore: E11` 会掉进「不认识这个码」，
+        # 文案从「ERROR 不能豁免」退化成「没这个码」——校验清单里 14 个码的承诺就不成立了（审计 P19）。
+        ("豁免注释：写 pf-ignore: E11 要报「是 ERROR」而不是「不认识」",
+         lambda: sub(with_plain_r3(), plain_r3_new, plain_r3_new + "\n<!-- pf-ignore: E11 我也说不清 -->"),
+         {"E11"}, {"W2"}, "豁免只对 WARN 生效", set()),
     ]
     for case in inline:
         name, build, want = case[0], case[1], case[2]
@@ -1182,6 +1607,92 @@ def selftest() -> int:
             failed += 1
             for f in findings:
                 print(f"      {f.render()}")
+
+    # 读不了文件（拿目录当输入）：必须打印一行 ERROR 并退出码 1，不能抛 traceback（审计 F2）。
+    with tempfile.TemporaryDirectory() as tmp:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = report(Path(tmp))
+        out = buf.getvalue()
+        ok = rc == 1 and "ERROR: 读不了文件" in out and "Traceback" not in out
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] 读不了文件时打印 ERROR 而不抛 traceback：退出码 {rc}")
+        if not ok:
+            failed += 1
+            print("      " + " / ".join(out.strip().splitlines()[-3:]))
+
+    # U+2028 不是换行符：报错行号必须和编辑器一致（审计 F8）。
+    noisy = sub(SELFTEST_FIXTURE, "## 1. 角色与目标\n", "## 1. 角色与目标\u2028\n")
+    want_line = noisy.split("\n").index("- **R2** 输出界面要美观，空行最多跳过 3 行。") + 1
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "u2028.prompt.md"
+        path.write_text(noisy, encoding="utf-8")
+        noisy_findings, _ = check_file(path)
+    got_lines = sorted({f.line for f in noisy_findings if f.code == "E9" and "美观" in f.message})
+    ok = got_lines == [want_line]
+    print(f"{'PASS' if ok else 'FAIL'}  [闸门] U+2028 时 E9 行号不漂：{got_lines}（期望 [{want_line}]）")
+    if not ok:
+        failed += 1
+        for f in noisy_findings:
+            if f.code == "E9":
+                print("      " + f.render())
+
+    # UTF-16（记事本另存）按 BOM 解码，不能落一个莫名其妙的 E0（审计 F17）。
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "utf16.prompt.md"
+        path.write_bytes(from_clean().encode("utf-16"))
+        utf16_findings, _ = check_file(path)
+    utf16_errors = [f for f in utf16_findings if f.level == "ERROR"]
+    ok = not utf16_errors
+    print(f"{'PASS' if ok else 'FAIL'}  [闸门] UTF-16 文件按 BOM 解码：{len(utf16_errors)} ERROR（期望 0）")
+    if not ok:
+        failed += 1
+        for f in utf16_errors[:5]:
+            print("      " + f.render())
+
+    # 围栏内容不能把后面的行号整体前移：E9 报的行号必须和编辑器里看到的一致（审计 F9）。
+    shifted = sub(
+        SELFTEST_FIXTURE,
+        "- **R3**",
+        "```text\n示例\n\n示例二\n```\n\n- **R4** 界面要美观。\n\n- **R3**",
+    )
+    shifted_line = shifted.split("\n").index("- **R4** 界面要美观。") + 1
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "fence-shift.prompt.md"
+        path.write_text(shifted, encoding="utf-8")
+        shifted_findings, _ = check_file(path)
+    shifted_lines = sorted({f.line for f in shifted_findings if f.code == "E9" and "美观" in f.message})
+    ok = shifted_line in shifted_lines
+    print(f"{'PASS' if ok else 'FAIL'}  [闸门] 代码围栏不引起 E9 行号漂移：{shifted_lines}（须含 [{shifted_line}]）")
+    if not ok:
+        failed += 1
+        for f in shifted_findings:
+            if f.code == "E9":
+                print("      " + f.render())
+
+    # E4/E5/E6 必须带行号：没有行号的报错等于让人重新全文找一遍（审计 F14）。
+    unlined = sub(
+        from_clean(),
+        "- **A2（对应 R2）** 遇到空行不中断。判定：阈值 跳过行数 ≤ 3。",
+        "- **A2** 遇到空行不中断。",
+    )
+    a2_line = unlined.split("\n").index("- **A2** 遇到空行不中断。") + 1
+    r2_line = unlined.split("\n").index("- **R2** 输出控制在两行以内，空行最多跳过 3 行。") + 1
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "line-numbers.prompt.md"
+        path.write_text(unlined, encoding="utf-8")
+        unlined_findings, _ = check_file(path)
+    def _lines(code: str) -> list[int]:
+        return sorted({f.line for f in unlined_findings if f.code == code})
+    ok = _lines("E4") == [a2_line] and _lines("E5") == [a2_line] and _lines("E6") == [r2_line]
+    print(
+        f"{'PASS' if ok else 'FAIL'}  [闸门] E4/E5/E6 带行号：E4 {_lines('E4')}、E5 {_lines('E5')}、"
+        f"E6 {_lines('E6')}（期望 E4/E5 [{a2_line}]、E6 [{r2_line}]）"
+    )
+    if not ok:
+        failed += 1
+        for f in unlined_findings:
+            if f.code in ("E4", "E5", "E6"):
+                print("      " + f.render())
 
     print(f"\n自测结果：{'全部通过' if not failed else f'{failed} 个用例不通过'}")
     return 1 if failed else 0
