@@ -232,14 +232,17 @@ def marker_hit(text: str, marker: str) -> bool:
 
     - `re:` 前缀 → 正则（在折叠空白后的文本上匹配，用来表达「不适用」这类否定边界）
     - 纯 ASCII 短词 → 词边界匹配（`go` 不该被 `good` 命中）
-    - 其余（中文短语）→ 折叠空白后的子串匹配（`不 接` 也算命中）
+    - 其余（中文短语 / 带空格的英文短句）→ 折叠空白后的子串匹配（`不 接` 也算命中）
+
+    子串匹配大小写不敏感：YAML 里写 `Don't use`（句首大写）与词表里的 `don't use` 是同一个边界，
+    旧版区分大小写，句首大写的合法写法被漏认成 E6（第 5 轮审计 R5-PF-G3-10）。
     """
     if marker.startswith("re:"):
         return re.search(marker[3:], fold_ws(text)) is not None
     if ASCII_MARKER_RE.fullmatch(marker):
         pattern = r"(?<![A-Za-z0-9])" + re.escape(marker) + r"(?![A-Za-z0-9])"
         return re.search(pattern, text, re.IGNORECASE if marker.islower() else 0) is not None
-    return fold_ws(marker) in fold_ws(text)
+    return fold_ws(marker).casefold() in fold_ws(text).casefold()
 
 
 def has_marker(text: str, markers: list[str]) -> bool:
@@ -268,9 +271,16 @@ def pattern_line(lines: list[str], pattern: re.Pattern[str], start: int, default
 
 
 def unquote(value: str) -> str:
-    """去掉 YAML 值两端成对的引号。"""
+    """去掉 YAML 值两端成对的引号，并还原单引号标量里的 `''` 转义（YAML：`''` → `'`）。
+
+    旧版只剥引号、不还原转义：合法写法 `'When the user … Don''t use …'` 读出来带着两个单引号，
+    边界词认不出，于是报 E6 + W2 —— 宿主按 YAML 解析后明明是合规的描述（第 5 轮审计 R5-PF-G3-06）。
+    双引号标量不做转义还原：description 里极少出现 `\"` / `\n` 这类转义，保持原样风险更低。
+    """
     value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("''", "'")
+    if len(value) >= 2 and value[0] == value[-1] == '"':
         return value[1:-1].strip()
     return value
 
@@ -295,6 +305,25 @@ def strip_inline_comment(value: str) -> str:
     return value
 
 
+def _fold_plain_parts(parts: list[str]) -> str:
+    """按 YAML 纯标量的折叠规则拼多行值：单个换行折成空格，空行折成换行（段落分隔）。
+
+    实测 PyYAML 口径：`["a", "b"]` → `a b`；`["a", "", "b"]` → `a\\nb`。旧版遇到空行就整个
+    结束标量，边界写在第二段的合法写法被漏读成 E6（第 5 轮审计 R5-PF-G3-05）。
+    """
+    out = ""
+    blank = 0
+    for part in parts:
+        if not part:
+            blank += 1
+            continue
+        if out:
+            out += "\n" * blank if blank else " "
+        out += part
+        blank = 0
+    return out
+
+
 def parse_frontmatter(text: str) -> tuple[dict[str, str], int, str, dict[str, int]]:
     """解析最简 YAML frontmatter。
 
@@ -303,7 +332,7 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], int, str, dict[str, in
 
     只认 `key: value`，另外照顾三种真实写法：
     - `|` / `>` 块标量（description 常这么写）；
-    - 值写在下方的**缩进续行**里，或折行续写（YAML 纯标量折行，按空格折叠）；
+    - 值写在下方的**缩进续行**里，或折行续写（YAML 纯标量折行，按空格折叠；空行是段落分隔）；
     - 行内注释。
     """
     lines = split_lines(text)
@@ -336,16 +365,31 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], int, str, dict[str, in
         j = i + 1
         while j < len(lines):
             nxt = lines[j]
-            if not nxt.strip() or nxt[:1] not in (" ", "\t"):
+            if not nxt.strip():
+                # YAML 纯标量里的空行是段落分隔（折叠后是一个换行），不是标量结束：
+                # 只要下一个非空行仍是缩进续行，值就还没完（第 5 轮审计 R5-PF-G3-05）。
+                k = j + 1
+                while k < len(lines) and not lines[k].strip():
+                    k += 1
+                if (k < len(lines) and lines[k][:1] in (" ", "\t")
+                        and not FRONTMATTER_KEY_RE.match(lines[k])):
+                    parts.append("")
+                    j = k
+                    continue
+                break
+            if nxt[:1] not in (" ", "\t"):
                 break
             if nxt.lstrip().startswith("#"):
                 j += 1
                 continue
             parts.append(strip_inline_comment(nxt).strip())
             j += 1
-        fields[key] = unquote(" ".join(part for part in parts if part))
+        fields[key] = unquote(_fold_plain_parts(parts))
         i = j
     return fields, 0, "unclosed", key_lines
+
+
+_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 
 
 def strip_fences(text: str) -> str:
@@ -353,23 +397,36 @@ def strip_fences(text: str) -> str:
 
     闸门看的是"这个技能自己声称了什么"，而正文里的代码块大多是**引用的样例**：
     样例里出现的「先分诊」「不接」「AGENTS.md」是别人的文字，不该被当成这个技能的声明。
-    （同款做法见 check_prompt.py 的 fence_lines()。）
+
+    围栏按 CommonMark 配对：同一种字符、闭合 run 不短于开栏 run、闭合行后面只能有空白。
+    旧版只看前三个字符，```` 开的样例里嵌一个 ``` 就被提前关掉，样例文字漏进正文 ——
+    只拷贝了 SKILL.md 的薄包装会被样例里的 `AGENTS.md` 误报 E7（第 5 轮审计 R5-PF-G3-07）。
+    口径与 check_prompt.py 的 fence_lines() 一致。
     """
     kept: list[str] = []
-    fence: str | None = None
+    fence: tuple[str, int] | None = None
     for line in split_lines(text):
         stripped = line.lstrip()
-        marker = stripped[:3]
+        match = _FENCE_RE.match(stripped)
         if fence is None:
-            if marker in ("```", "~~~"):
-                fence = marker
+            if match is not None:
+                fence = (match.group(1)[0], len(match.group(1)))
                 continue
-        else:
-            if stripped.startswith(fence):
-                fence = None
-            continue
-        kept.append(line)
+            kept.append(line)
+        elif (match is not None and match.group(1)[0] == fence[0]
+              and len(match.group(1)) >= fence[1]
+              and not stripped[len(match.group(1)):].strip()):
+            fence = None
     return "\n".join(kept)
+
+
+def _sibling_prose(prose: str) -> str:
+    """归一化同目录前缀 `./` 再匹配依赖：`./AGENTS.md` 与 `AGENTS.md` 是同一个同目录文件。
+
+    `../` 与绝对路径仍不算同目录（前面的字符是 `/`、`\\`、`:`，会被 SIBLING_PATTERNS 的环视挡住）。
+    旧版漏认 `./AGENTS.md`，只拷贝 SKILL.md 时依赖明明缺了却不报 E7（第 5 轮审计 R5-PF-G3-08）。
+    """
+    return re.sub(r"(?<!\.)\./", "", prose)
 
 
 def check_skill(path: Path) -> tuple[list[Finding], int]:
@@ -464,7 +521,8 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
     if prose.strip():
         # 同目录依赖：只有正文真的引用了同目录文件，才要求它在同目录里存在。
         # `../AGENTS.md`、绝对路径不算"同目录"（SIBLING_PATTERNS 的环视负责这件事）。
-        referenced = [rel for rel, pattern in SIBLING_PATTERNS.items() if pattern.search(prose)]
+        referenced = [rel for rel, pattern in SIBLING_PATTERNS.items()
+                      if pattern.search(_sibling_prose(prose))]
         # 薄包装形态：正文引用了同目录的规范本体，才要求写"动手前先读完"。
         is_wrapper = any(rel in SPEC_FILE_MARKERS for rel in referenced)
 
@@ -621,6 +679,22 @@ def selftest() -> int:
         # description 里带 U+2028：它不是换行，不能把值劈成两半（旧版会假报 E6）
         ("description 里带 U+2028",
          lambda: sub(SELFTEST_FIXTURE, "不接：已经", "不接：\u2028已经"), set()),
+        # ---- 第 5 轮审计撞出来的 YAML 写法假红（宿主按 YAML 解析后都是合规描述）
+        # 单引号标量里的 `''` 是转义的单引号：`Don''t use` 就是 `Don't use`，不该报 E6
+        ("单引号 YAML 里的 '' 转义（第 5 轮 R5-PF-G3-06）",
+         lambda: sub(SELFTEST_FIXTURE, desc_line,
+                     "description: 'When the user needs a demo. Don''t use for chat.'"), set()),
+        # 纯标量的空行是段落分隔（折叠成一个换行），边界写在第二段也要认
+        ("description 纯标量里空行后的第二段（第 5 轮 R5-PF-G3-05）",
+         lambda: sub(SELFTEST_FIXTURE, desc_line,
+                     "description: 当用户需要演示时，使用本技能给出步骤。\n\n  不接：纯聊天。"), set()),
+        # 边界词句首大写：Don't use 与词表里的 don't use 是同一个边界（第 5 轮 R5-PF-G3-10）
+        ("边界词句首大写 Don't use（第 5 轮 R5-PF-G3-10）",
+         lambda: sub(SELFTEST_FIXTURE, desc_line,
+                     "description: \"When the user needs a demo. Don't use for chat.\""), set()),
+        # 薄包装只拷 SKILL.md：`./AGENTS.md` 与 `AGENTS.md` 是同一个同目录文件，不能漏报
+        ("只拷 SKILL.md 且依赖写成 ./AGENTS.md（第 5 轮 R5-PF-G3-08）",
+         lambda: sub(SELFTEST_FIXTURE, "`AGENTS.md`", "`./AGENTS.md`"), {"E7"}),
         # 薄包装只拷一个 SKILL.md：AGENTS.md / references/ / scripts/ 都不在
         ("只拷 SKILL.md（缺同目录文件）", lambda: SELFTEST_FIXTURE, {"E7"}),
     ]
@@ -656,6 +730,38 @@ def selftest() -> int:
         got = {f.code for f in findings if f.level == "ERROR"}
         ok = got == want
         print(f"{'PASS' if ok else 'FAIL'}  [闸门] {name}: ERROR 码 {sorted(got)}（期望 {sorted(want)}）")
+        if not ok:
+            failed += 1
+            for f in findings:
+                if f.level == "ERROR":
+                    print(f"      {f.render()}")
+
+    # 2.5) 嵌套围栏：```` 包的样例里再写 ```，样例仍是别人的文字。只有 `<name>/SKILL.md`
+    #      没有同目录 AGENTS.md 时，样例里那句「先读 AGENTS.md」不能被算成本技能的依赖
+    #      （旧版只认前三个反引号，内层 ``` 就把外层样例提前关掉 → 假 E7，第 5 轮 R5-PF-G3-07）。
+    nested = (
+        "---\n"
+        "name: prompt-forge\n"
+        "description: 当用户需要演示时，使用本技能给出步骤。不接：纯聊天。\n"
+        "---\n\n"
+        "# 演示\n\n"
+        "下面是别的技能的样例：\n\n"
+        "````markdown\n"
+        "```\n"
+        "开始之前先读同目录的 AGENTS.md。\n"
+        "```\n"
+        "````\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_dir = Path(tmp) / "prompt-forge"
+        skill_dir.mkdir()
+        path = skill_dir / "SKILL.md"
+        write_text_lf(path, nested)
+        findings, _ = check_skill(path)   # 故意不放 AGENTS.md：样例不是本技能的依赖
+        got = {f.code for f in findings if f.level == "ERROR"}
+        ok = not got
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] 嵌套围栏里的样例不算同目录依赖: "
+              f"ERROR 码 {sorted(got)}（期望 []）")
         if not ok:
             failed += 1
             for f in findings:

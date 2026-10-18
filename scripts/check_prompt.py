@@ -20,6 +20,7 @@ import io
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 def _setup_stdout() -> None:
@@ -122,15 +123,32 @@ EXT_WHITELIST = (
     r"yml|yaml|toml|ini|sh|ps1|cmd|bat|sql|xlsx|docx|pptx|pdf|png|jpg|jpeg|svg|webp|exe|zip|log|env|"
     r"c|h|r|m|o|a|7z"
 )
+#: 两段路径（段长封顶 255）：旧版 `[...]*` 在「无空白超长行」上是 O(n²) 回溯
+#: （交付物段里塞一行 200KB 的字母，has_path_token 能卡到分钟级，审计 R5-gate1-01）。
+#: 文件系统单段路径本来就不超过 255，封顶不影响任何真实路径。
 PATH_RE = re.compile(
-    r"(?:[A-Za-z0-9_\-.]*[\\/][A-Za-z0-9_\-.]*)\."      # 带目录的路径：扩展名走白名单 + 兜底
+    rf"(?:[A-Za-z0-9_\-.]{{0,255}}[\\/][A-Za-z0-9_\-.]{{0,255}})\."   # 带目录：白名单 + 兜底扩展名
     rf"(?:{EXT_WHITELIST}|[A-Za-z][A-Za-z0-9]{{1,7}})"
-    rf"|[A-Za-z0-9_\-]+\.(?:{EXT_WHITELIST})",           # 裸文件名：只认白名单扩展名
+    rf"|[A-Za-z0-9_\-]{{1,255}}\.(?:{EXT_WHITELIST})",                 # 裸文件名：只认白名单
     re.IGNORECASE,
 )
 #: 交付物/需求里先剥掉的「非路径」token：URL 与前端库名。
 #: `https://example.com/release`、`Next.js`、`Tailwind.css` 都长得像带扩展名的路径。
-URL_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.\-]*://|www\.)\S+")
+#: scheme 长度封顶 64：旧版 `[A-Za-z0-9+.\-]*` 在无空白长字母行上同样是 O(n²)
+#: （1MB 单行 >10 分钟，审计 R5-gate1-01）；真实 scheme 最长也就十几字符，封顶无副作用。
+URL_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.\-]{0,63}://|www\.)\S+")
+
+
+def strip_urls(text: str) -> str:
+    """把 URL 换成空格（E8 的 has_path_token 与 E10 的占位符扫描共用）；先过廉价守卫。
+
+    `://` 与 `www.` 是 URL_RE 两个分支各自必须出现的字面量：两者都没有的行不可能命中，
+    直接返回即可 —— 无空白长行因此连正则都不进（审计 R5-gate1-01：1MB 单行 >10 分钟）。
+    真带 `://` 的行由封顶的 scheme 量词保证 O(64n)，不会退化成平方回溯。
+    """
+    if "://" not in text and "www." not in text:
+        return text
+    return URL_RE.sub(" ", text)
 LIB_NAME_RE = re.compile(
     r"(?<![\w./\\-])(?:node|next|nuxt|vue|react|angular|svelte|tailwind|ember|alpine|deno|bun|"
     r"express|nest|three|jquery|webpack|vite|rollup|eslint|prettier|babel|jest|vitest)"
@@ -248,10 +266,11 @@ NEGATION_CHARS = "非不无"
 #: `判定：` 的三种取值（AGENTS.md 第 4 节）：命令 / 阈值 / 人工，三选一。
 JUDGE_KINDS = ("命令", "阈值", "人工")
 
-#: 判定方式必须是 `判定：` 后面**紧跟**三态词。纯子串匹配会被两种写法骗过：
-#: `判定：不需要人工（脚本自动跑）`、`判定方式另见下文，人工确认` —— 两者都没有有效判定，
-#: 却因为正文里出现了「人工」而通过 E5（审计 F5）。
-JUDGE_RE = re.compile(r"判定\s*[:：]\s*(命令|阈值|人工)")
+#: 判定方式必须是 `判定：` 后面**紧跟**三态词，但允许常见的包裹写法（加粗 / 反引号 /
+#: 中文引号 / 括号）：`判定：**人工**` 明确写了判定，旧版一律报 E5（审计 R5-gate1-03）。
+#: 纯子串匹配会被两种写法骗过：`判定：不需要人工（脚本自动跑）`、`判定方式另见下文，人工确认`
+#: —— 两者都没有有效判定，却因为正文里出现了「人工」而通过 E5（审计 F5）。
+JUDGE_RE = re.compile(r"判定\s*[:：]\s*(?:[`*_「『“‘（(【\[]\s*)*(命令|阈值|人工)")
 
 #: 段落里只写这些词（可带标点或括号）等于没写。
 EMPTY_CLAIMS = {"", "无", "没有", "none", "n/a", "不适用", "暂无", "略"}
@@ -278,6 +297,26 @@ def judge_kind(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+#: 一条 A# 自己的正文里，「子条目 / 表格行」不是这条验收的判定：
+#: `- **A3** …` 下面再挂 `- 参照 A1：判定：命令 …` 不能给 A3 兜底（审计 R5-gate1-04）。
+NESTED_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s|\d{1,2}[.)]\s|\|)")
+
+
+def judge_text(block: list[str]) -> str:
+    """A# 块里真正属于这条验收的正文：跳过围栏行与子条目 / 表格行。
+
+    `判定：` 必须写在这条 A# 的条目行或它的续行上；写在同块的子条目、表格行或围栏
+    示例里都不算 —— 旧版把整块拼起来交给 `JUDGE_RE`，于是 E5 被同块的「判定：命令」
+    「传染」成假绿：A3 本体根本没写判定，`--selftest` 里 0 ERROR（审计 R5-gate1-04）。
+    不带列表符号的续行仍然保留，正常排版（换行写判定）不受影响。
+    """
+    fenced = fence_lines(block)
+    return "\n".join(
+        line for j, line in enumerate(block)
+        if not fenced[j] and (j == 0 or not NESTED_ITEM_RE.match(line))
+    )
+
+
 def is_empty_claim(text: str) -> bool:
     """段落是否为空或只写了「无」（容忍「无。」「（无）」这类标点/括号写法）。
 
@@ -294,7 +333,12 @@ def has_path_token(text: str) -> bool:
     E8 问的是「交付物写了具体路径吗」。`https://example.com/release` 与
     `用 Next.js 写` 都不算 —— 它们没有交付路径，却能让旧正则命中 `.com` / `.js`（审计 F3）。
     """
-    text = URL_RE.sub(" ", text)
+    # 下面三个正则的每个分支都要求 token 里有 `.`（白名单/兜底扩展名、`.js` 库名）：
+    # 整段没有点就不可能命中，直接返回 —— 否则交付物段里一行 128KB 字母会让 PATH_RE
+    # 在每个起点上试满 255 字符（O(255n)，1MB 级要 8 秒，审计 R5-gate1-01）。
+    if "." not in text:
+        return False
+    text = strip_urls(text)
     text = LIB_NAME_RE.sub(" ", text)
     return bool(PATH_RE.search(text))
 
@@ -570,14 +614,23 @@ def item_body(text: str) -> str:
     return probe.lstrip("：: \t")
 
 
-def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], list[tuple[int, int]]]:
-    """扫全文收集 `R1` / `A2` 开头的条目。
+def collect_items(lines: list[str], letter: str,
+                  ranges: list[tuple[int, int]] | None = None) -> tuple[dict[int, list[str]], list[tuple[int, int]]]:
+    """收集 `R1` / `A2` 开头的条目；给了 `ranges` 时只认这些行区间里的条目。
 
     返回 ({编号: 条目正文行}, [(编号, 行号), ...] 重复编号)。条目块在遇到下一条目或下一个标题时结束。
     `lines` 必须已经剥过注释：`<!-- - **R9** 旧版草稿 -->` 不能变成「幽灵需求」逼出 E6
     （审计 F1）。剥注释在 `check_file()` 统一做，这里不再重复。
+
+    **条目归属段落**（审计 R5-gate1-02）：第 8 段按需求逐条列命令、第 9 段写「R2：…」
+    步骤、表格首列写 `R1`，这些都是**引用**，不是新条目 —— 旧版全文扫描把它们拼进同号
+    条目块、凑成重复编号，合规文档因此被判 `E2b` 红。现在由调用方传入第 4 / 第 7 段
+    （含子标题子树）的行区间，别段里的 `R#`/`A#` 一律忽略。`ranges=None` 才是全文扫描，
+    只用于「段落根本没绑定上」的兜底（此时 E1 已红，不能再叠一条 E2 误导人）。
     """
     starts: list[tuple[int, int]] = []
+    #: 每条条目的行号 → 它所属区间的结束行：块不能越过区间尾巴去吞别段正文。
+    span_end: dict[int, int] = {}
     fenced = fence_lines(lines)
     indented = indented_code_lines(lines, fenced)
     for idx, line in enumerate(lines):
@@ -588,6 +641,11 @@ def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], 
         if fenced[idx] or indented[idx]:
             continue
         num = item_start(line, letter)
+        if num is not None and ranges is not None:
+            owner_end = next((end for start, end in ranges if start <= idx < end), None)
+            if owner_end is None:
+                continue  # 这一段不是第 4/7 段：`R#`/`A#` 只是引用
+            span_end[idx] = owner_end
         if num is not None:
             starts.append((idx, num))
 
@@ -599,6 +657,8 @@ def collect_items(lines: list[str], letter: str) -> tuple[dict[int, list[str]], 
         if seen[num] == 2:
             duplicates.append((num, idx + 1))
         end = starts[i + 1][0] if i + 1 < len(starts) else len(lines)
+        if idx in span_end:
+            end = min(end, span_end[idx])
         block: list[str] = []
         for j in range(idx, end):
             if j != idx and not fenced[j] and not indented[j] and HEADING_RE.match(lines[j]):
@@ -632,10 +692,19 @@ def check_file(path: Path, use_ignore: bool = True,
     where = section_index(lines, sections)
     findings.extend(ignore_problems)
 
-    def _item_line(letter: str, num: int) -> int:
-        """条目所在的行号（1 基）；找不到返回 0 —— E4/E5/E6 靠它把误报定位到具体条目。"""
+    def _item_line(letter: str, num: int,
+                   ranges: list[tuple[int, int]] | None = None) -> int:
+        """条目所在的行号（1 基）；找不到返回 0 —— E4/E5/E6 靠它把误报定位到具体条目。
+
+        `ranges` 与 `collect_items` 同口径：只认第 4/7 段里的条目，别段里同号的引用行
+        不能把报错行号带偏。
+        """
         for i, ln in enumerate(lines):
-            if not fenced[i] and not indented[i] and item_start(ln, letter) == num:
+            if fenced[i] or indented[i]:
+                continue
+            if ranges is not None and not any(start <= i < end for start, end in ranges):
+                continue
+            if item_start(ln, letter) == num:
                 return i + 1
         return 0
 
@@ -760,8 +829,43 @@ def check_file(path: Path, use_ignore: bool = True,
                 )
             )
 
+    # 段位置与子树：E9 要按子树查模糊词，R#/A# 条目也只认绑定段（含子树）里的
+    # （审计 R5-gate1-02：第 8 段按需求列命令曾被当成重复需求）。
+    def _section_pos(start: int) -> int | None:
+        for i, (_title, _level, s, _end, _numbered) in enumerate(sections):
+            if s == start:
+                return i
+        return None
+
+    def _with_subtree(start: int, end: int) -> tuple[int, int]:
+        """绑定段 + 它下面的子标题子树。
+
+        `### 输出` 这种子标题里的模糊词也属于需求/验收段：旧版只查绑定段自己的正文，
+        子标题内容降级成 W9，等于给 A# 的模糊词留了一条静默通道（审计 F16）。
+        只往下扩到「级别比绑定段更深」的连续标题，不做全局扩散。
+        """
+        pos = _section_pos(start)
+        if pos is None:
+            return start, end
+        level = sections[pos][1]
+        last = pos
+        while last + 1 < len(sections) and sections[last + 1][1] > level:
+            last += 1
+        return start, sections[last][3]
+
+    def _item_ranges(label: str) -> list[tuple[int, int]] | None:
+        """第 4 / 第 7 段的条目区间（含子标题子树）；绑定不到时返回 None = 全文兜底。
+
+        E1 已经报「缺少必需段落」时不能再因为「条目为空」叠一条 E2：那份文档可能只是
+        标题写坏了、条目还在正文里。绑定成功时，其它段里的 `R#`/`A#` 一律算引用
+        —— 第 8 段按需求列命令、第 9 段步骤、表格首列写编号都是正常排版（审计 R5-gate1-02）。
+        """
+        span = matched.get(label)
+        return None if span is None else [_with_subtree(span[0], span[1])]
+
     # ---- R# 需求 -----------------------------------------------------------
-    requirements, dup_r = collect_items(lines, "R")
+    req_ranges = _item_ranges("4 需求（R#）")
+    requirements, dup_r = collect_items(lines, "R", ranges=req_ranges)
     if len(requirements) < 3:
         findings.append(
             Finding("ERROR", "E2", f"编号需求不足：找到 {len(requirements)} 条 R#，至少 3 条（形如 `R1 ...`）")
@@ -770,7 +874,8 @@ def check_file(path: Path, use_ignore: bool = True,
         findings.append(Finding("ERROR", "E2b", f"需求编号 R{num} 重复出现（编号必须唯一）", line_no))
 
     # ---- A# 验收 -----------------------------------------------------------
-    acceptances, dup_a = collect_items(lines, "A")
+    acc_ranges = _item_ranges("7 验收标准（A#）")
+    acceptances, dup_a = collect_items(lines, "A", ranges=acc_ranges)
     for num, line_no in dup_a:
         findings.append(Finding("ERROR", "E3b", f"验收编号 A{num} 重复出现（编号必须唯一）", line_no))
     if len(acceptances) < 3:
@@ -779,22 +884,23 @@ def check_file(path: Path, use_ignore: bool = True,
         )
     referenced: set[int] = set()
     for num, block in sorted(acceptances.items()):
-        text = "\n".join(block)
         # E4 / E6 的判据是「这条 A# 自己声明的需求号」—— 见 declared_refs()：条目行、续行里
         # 「对应/覆盖/…」后面的、以及带这些关键词的括号段。正文里顺带提一句别的 R# 不算覆盖。
         refs = declared_refs(block, num)
         if not refs:
             findings.append(Finding("ERROR", "E4", f"验收 A{num} 没有引用任何需求编号（应写「对应 R1」）",
-                                    _item_line("A", num)))
+                                    _item_line("A", num, acc_ranges)))
         referenced |= refs
-        if judge_kind(text) is None:
+        # 判定归属这条 A# 自己的条目行/续行：同块的子条目、表格行、围栏示例都不算
+        # （审计 R5-gate1-04：A3 本体没写判定，块内示例里的 `判定：命令` 曾让它假绿）。
+        if judge_kind(judge_text(block)) is None:
             findings.append(
                 Finding("ERROR", "E5", f"验收 A{num} 没有 `判定：`，或没写判定方式（命令 / 阈值 / 人工 三者之一）",
-                        _item_line("A", num))
+                        _item_line("A", num, acc_ranges))
             )
     for num in sorted(set(requirements) - referenced):
         findings.append(Finding("ERROR", "E6", f"需求 R{num} 没有任何验收条目覆盖它",
-                                _item_line("R", num)))
+                                _item_line("R", num, req_ranges)))
 
     # ---- E7 非目标 ---------------------------------------------------------
     goal_label = "5 非目标"
@@ -819,28 +925,7 @@ def check_file(path: Path, use_ignore: bool = True,
         _flag_vague(findings, "交付物", body, start, "WARN")
 
     # ---- E9 模糊词 ---------------------------------------------------------
-    def _section_pos(start: int) -> int | None:
-        for i, (_title, _level, s, _end, _numbered) in enumerate(sections):
-            if s == start:
-                return i
-        return None
-
-    def _with_subtree(start: int, end: int) -> tuple[int, int]:
-        """绑定段 + 它下面的子标题子树。
-
-        `### 输出` 这种子标题里的模糊词也属于需求/验收段：旧版只查绑定段自己的正文，
-        子标题内容降级成 W9，等于给 A# 的模糊词留了一条静默通道（审计 F16）。
-        只往下扩到「级别比绑定段更深」的连续标题，不做全局扩散。
-        """
-        pos = _section_pos(start)
-        if pos is None:
-            return start, end
-        level = sections[pos][1]
-        last = pos
-        while last + 1 < len(sections) and sections[last + 1][1] > level:
-            last += 1
-        return start, sections[last][3]
-
+    # `_section_pos` / `_with_subtree` 定义在 E1 绑定之后（R#/A# 条目归属也用它）。
     # 用段落的实际行号区间做去重键：标题字数由使用者决定（`## 4. 需求（R#）` 或 `## 需求（R#）` 都合法），
     # 拿 label 字符串比对会在不编号的标题上失配，同一段就会被 E9 和 W9 各报一次。
     checked: set[tuple[int, int]] = set()
@@ -882,7 +967,7 @@ def check_file(path: Path, use_ignore: bool = True,
     # 反过来小写 `todo` 也是没改完的证据，要抓（审计 F11）。
     for idx, line in enumerate(text_lines, start=1):
         probe = CODE_SPAN_RE.sub("", line)
-        probe = URL_RE.sub(" ", probe)
+        probe = strip_urls(probe)
         probe = FILE_TOKEN_RE.sub(" ", probe)
         token = placeholder_hit(probe)
         if token is not None:
@@ -908,7 +993,7 @@ def check_file(path: Path, use_ignore: bool = True,
         # requirements 是 collect_items 在**已剥注释**的行上收集的（见 check_file 的两套行视图），
         # 所以这里不用再剥一次；注释里的数字不会混进来骗过下面的 NUMBER_RE。
         text = "\n".join(block)
-        line_no = _item_line("R", num)
+        line_no = _item_line("R", num, req_ranges)
         # 只看标记（`- **R9**`）之后的正文：标记里的编号是数字，会骗过下面的 NUMBER_RE。
         body = item_body(text)
         # 代码段（`openpyxl`）本身就是「具体对象」，所以有代码段时照样豁免。
@@ -1233,6 +1318,8 @@ def selftest() -> int:
     plain_r3 = "- **R3** 入口是 scripts/borrow.py，正常退出码 0，异常退出码 1。"
     #: 一条没有数字 / 路径 / 代码段的需求：专门用来喂出 W2（豁免用例需要一个 WARN 当靶子）。
     plain_r3_new = "- **R3** 界面要顺手。"
+    #: 夹具里那条完整、合法的 A3：「判定」写法相关的用例都在这条上做替换。
+    a3_line = "- **A3（对应 R3）** 入口与退出码符合要求。判定：人工 看 main 分支。"
 
     def sub(text: str, old: str, new: str) -> str:
         """替换前先断言目标真的在文本里。
@@ -1309,11 +1396,14 @@ def selftest() -> int:
          lambda: insert_before_requirement("## 100 分需求说明"), {"E9"}),
         # `4K` 段里也有 `R#` 条目时，只有「4K 不是编号」这一条能救场：旧正则把它当编号 4，
         # 于是与真需求段在排序键的前三层上全部打平，最后靠文档顺序取胜（E9 照样空转）。
+        # 期望不含 E6：`## 4K 需求素材说明` 没绑定成第 4 段（绑的是后面真正的 `## 4. 需求（R#）`），
+        # 按 R5-gate1-02 的条目归属规则，别段里的 `R9` 是引用、不算新需求 —— 旧版报 E6 正是
+        # 「全文扫条目」的副产品（第 8/9 段按需求列命令会被同类误报成重复需求）。
         ("数字开头的段名 4K（段内也有条目）",
          lambda: sub(SELFTEST_FIXTURE, "## 4. 需求（R#）",
                      "## 4K 需求素材说明\n\n- **R9** 素材必须真 4K，不缩放。判定：人工 看素材尺寸。\n\n"
                      "## 4. 需求（R#）"),
-         {"E9", "E6"}),
+         {"E9"}),
         # 一条**空的**带编号标题压在真需求段上方：两条候选都带编号，旧排序键按「号数相符」
         # 选中了那条空的，真段落的模糊词降级成 W9（审计 BUG-A 的第二种形态）。
         # 判据必须优先看「段内真有条目」，而不是谁带编号、谁号数对得上。
@@ -1546,6 +1636,82 @@ def selftest() -> int:
         ("豁免注释：写 pf-ignore: E11 要报「是 ERROR」而不是「不认识」",
          lambda: sub(with_plain_r3(), plain_r3_new, plain_r3_new + "\n<!-- pf-ignore: E11 我也说不清 -->"),
          {"E11"}, {"W2"}, "豁免只对 WARN 生效", set()),
+        # ---- R5-gate1 回归：判定写法与 E5 归属 -------------------------------
+        # 判定值允许常见包裹：加粗 / 反引号 / 中文引号 / 括号。旧 JUDGE_RE 只认冒号后
+        # 紧贴三态词，这四种写法全被误报 E5（审计 R5-gate1-03）。
+        ("判定写法：加粗包裹",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。判定：**人工** 看 main 分支。"),
+         set()),
+        ("判定写法：反引号包裹",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。判定：`人工` 看 main 分支。"),
+         set()),
+        ("判定写法：中文引号包裹",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。判定：「人工」 看 main 分支。"),
+         set()),
+        ("判定写法：括号包裹",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。判定：（人工） 看 main 分支。"),
+         set()),
+        # 包裹里塞否定仍然不算写了判定：E5 要照报，不能因为放宽包裹就变绿。
+        ("判定写法：包裹里的否定不算",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。判定：**不是人工** 看 main 分支。"),
+         {"E5"}),
+        # 判定归属这条 A# 自己：同块子条目里的「判定：命令」不能把 A3 的 E5 传染成绿
+        # （审计 R5-gate1-04；旧版把整块拼起来交给 JUDGE_RE）。
+        ("判定归属：子条目里的判定不算 A3 自己的",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。判定见下。\n"
+                     "  - 参照 A1：判定：命令 `python scripts/borrow.py`。"),
+         {"E5"}),
+        ("判定归属：围栏示例里的判定不算 A3 自己的",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。判定见下。\n"
+                     "```text\n判定：命令 python scripts/borrow.py\n```"),
+         {"E5"}),
+        # 正常排版：判定写在 A# 的续行上仍然算这条验收的判定。
+        ("判定归属：换行续写判定",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。\n  判定：人工 看 main 分支。"),
+         set()),
+        # ---- R5-gate1 回归：别段里的 R#/A# 条目只是引用 -----------------------
+        # 第 8 段按需求逐条列命令、表格首列写编号、第 9 段步骤里写 R#/A#，都是正常排版：
+        # 旧版全文收集条目，把它们当成「新需求/新验收」，合规文档被 E2b/E3b/E6 误杀
+        # （审计 R5-gate1-02；ghost.prompt.md 在 CLI 上是 3 ERROR）。
+        ("别段条目只是引用：验证段按需求列命令",
+         lambda: sub(from_clean(), "期望输出：out/borrow.csv 生成，退出码 0。",
+                     "期望输出：out/borrow.csv 生成，退出码 0。\n\n按需求逐条验证：\n"
+                     "- R1：`python scripts/borrow.py --check`\n"
+                     "- R2：`python scripts/borrow.py --skip-blank`\n"
+                     "- R3：`python scripts/borrow.py --exit`"),
+         set()),
+        ("别段条目只是引用：验证段表格首列写编号",
+         lambda: sub(from_clean(), "期望输出：out/borrow.csv 生成，退出码 0。",
+                     "期望输出：out/borrow.csv 生成，退出码 0。\n\n"
+                     "| 需求 | 命令 |\n| --- | --- |\n"
+                     "| R1 | `python scripts/borrow.py --check` |\n"
+                     "| R2 | `python scripts/borrow.py --skip-blank` |\n"
+                     "| R3 | `python scripts/borrow.py --exit` |"),
+         set()),
+        ("别段条目只是引用：步骤段写 A1",
+         lambda: sub(from_clean(), "3. 入口收在 scripts/borrow.py，退出码固定 0/1（对应 R3）",
+                     "3. 入口收在 scripts/borrow.py，退出码固定 0/1（对应 R3）\n"
+                     "- A1：先确认 out/borrow.csv 已生成。"),
+         set()),
+        ("别段条目只是引用：步骤段写 R9",
+         lambda: sub(from_clean(), "3. 入口收在 scripts/borrow.py，退出码固定 0/1（对应 R3）",
+                     "3. 入口收在 scripts/borrow.py，退出码固定 0/1（对应 R3）\n"
+                     "4. R9：把汇总清单也发一份。"),
+         set()),
+        # 反过来：同一段里真重复的 R# 仍然必须报 E2b（修复不能把重复检测一起放过）。
+        ("同一段里真重复 R# 仍报 E2b",
+         lambda: sub(from_clean(), "- **R2** 输出控制在两行以内，空行最多跳过 3 行。",
+                     "- **R2** 输出控制在两行以内，空行最多跳过 3 行。\n"
+                     "- **R2** 也支持 data/old.xlsx 的回填。"),
+         {"E2b"}),
     ]
     for case in inline:
         name, build, want = case[0], case[1], case[2]
@@ -1693,6 +1859,70 @@ def selftest() -> int:
         for f in unlined_findings:
             if f.code in ("E4", "E5", "E6"):
                 print("      " + f.render())
+
+    # ---- R5-gate1 回归：病态输入的性能与编码边界 --------------------------
+    # E10 曾对每一行跑 `URL_RE.sub`：无空白的字母数字行会触发 O(n²) 回溯，1MB 单行 >10 分钟
+    # （审计 R5-gate1-01：160KB 62.6s，faulthandler 卡在 `check_prompt.py` 的 URL_RE.sub）。
+    # 交付物段的 PATH_RE 同根因（只对交付段落生效，同样能卡死 E8）。这里用定长串做回归，
+    # 阈值故意放宽到 5s / 10s：测的是「线性不退化」，不是机器跑分。
+    def _run_timed(text: str) -> tuple[set[str], float]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "perf.prompt.md"
+            path.write_text(text, encoding="utf-8")
+            started = time.perf_counter()
+            findings, _ = check_file(path)
+            elapsed = time.perf_counter() - started
+        return {f.code for f in findings if f.level == "ERROR"}, elapsed
+
+    perf_cases = [
+        ("无空白超长单行（131072 字符）",
+         sub(from_clean(), "每周五花 15 分钟手工抄一遍。[AI 推断]",
+             "每周五花 15 分钟手工抄一遍。[AI 推断]\n" + "a" * 131072),
+         set(), 5.0),
+        ("超长单行里带真 URL",
+         sub(from_clean(), "每周五花 15 分钟手工抄一遍。[AI 推断]",
+             "每周五花 15 分钟手工抄一遍。[AI 推断]\n" + "b" * 65536 + " 见 https://example.com/x"),
+         set(), 3.0),
+        # 交付物段被一行 524288 字母替换（唯一的 out/borrow.csv 没了）：E8 必须照报且不卡。
+        # 长度取到 512KB 是为了让「删掉 has_path_token 的改点」真的超时：PATH_RE 的 255 段量词
+        # 在 512KB 上约 7s（修复前 1MB 更久），修复后走「没有点」快速通道 < 1s。
+        ("交付物段超长单行仍要报 E8",
+         sub(from_clean(), "| out/borrow.csv | UTF-8，只输出本周新增行 | 1 个 |",
+             "交付到 " + "c" * 524288),
+         {"E8"}, 3.0),
+        ("约 560KB 多行正常文档不退化",
+         from_clean() + "".join(
+             f"\n第 {i} 行附注：把借阅登记的输出控制在两行以内。" for i in range(1, 20001)),
+         set(), 10.0),
+    ]
+    for perf_name, perf_text, want_perf, limit in perf_cases:
+        got_perf, elapsed = _run_timed(perf_text)
+        ok = got_perf == want_perf and elapsed < limit
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] 病态输入：{perf_name}："
+              f"ERROR 码 {sorted(got_perf)}、{elapsed:.2f}s（期望 {sorted(want_perf)} 且 < {limit:g}s）")
+        if not ok:
+            failed += 1
+
+    # 输入编码边界（审计 R5-gate1-05 补测；修复前后行为都已实跑确认）：
+    # GBK / CRLF / BOM / 正文 NUL 必须照常检查，非法 UTF-8 字节必须确定性地落 E0。
+    encoding_cases = [
+        ("CRLF", from_clean().replace("\n", "\r\n").encode("utf-8"), set()),
+        ("UTF-8 BOM", b"\xef\xbb\xbf" + from_clean().encode("utf-8"), set()),
+        ("正文含 NUL", from_clean().replace("[AI 推断]", "[AI 推断]\x00", 1).encode("utf-8"), set()),
+        ("GBK 编码", from_clean().encode("gbk"), set()),
+        ("非法 UTF-8 字节", b"\x80\x81\x82\x83\x84\x85\x86", {"E0"}),
+    ]
+    for enc_name, data, want_enc in encoding_cases:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "encoding.prompt.md"
+            path.write_bytes(data)
+            findings, _ = check_file(path)
+        got_enc = {f.code for f in findings if f.level == "ERROR"}
+        ok = got_enc == want_enc
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] 输入编码边界：{enc_name}："
+              f"ERROR 码 {sorted(got_enc)}（期望 {sorted(want_enc)}）")
+        if not ok:
+            failed += 1
 
     print(f"\n自测结果：{'全部通过' if not failed else f'{failed} 个用例不通过'}")
     return 1 if failed else 0

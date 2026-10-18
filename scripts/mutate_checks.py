@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -103,6 +104,37 @@ MUTATIONS: list[Mutation] = [
         "    lines = split_lines(strip_comments(raw))",
         "    lines = split_lines(raw)",
     ),
+    # ---------- 闸门①：第 5 轮 gate1 新增（与既有 7 条不重复） ----------
+    Mutation(
+        "判定三态不认包裹（JUDGE_RE 退回紧贴三态词）", "check_prompt.py",
+        'JUDGE_RE = re.compile(r"判定\\s*[:：]\\s*(?:[`*_「『“‘（(【\\[]\\s*)*(命令|阈值|人工)")',
+        'JUDGE_RE = re.compile(r"判定\\s*[:：]\\s*(命令|阈值|人工)")',
+    ),
+    Mutation(
+        "判定归属退回整块拼接（子条目/围栏的判定传染 A#）", "check_prompt.py",
+        "        if judge_kind(judge_text(block)) is None:",
+        '        if judge_kind("\\n".join(block)) is None:',
+    ),
+    Mutation(
+        "条目收集退回全文扫描（别段 R# 变幽灵需求）", "check_prompt.py",
+        '    requirements, dup_r = collect_items(lines, "R", ranges=req_ranges)',
+        '    requirements, dup_r = collect_items(lines, "R")',
+    ),
+    Mutation(
+        "URL 量词退回无上限（无空白长行 O(n²)）", "check_prompt.py",
+        'URL_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.\\-]{0,63}://|www\\.)\\S+")',
+        'URL_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.\\-]*://|www\\.)\\S+")',
+    ),
+    Mutation(
+        "has_path_token 的「没有点」快速通道被删（PATH_RE 空转）", "check_prompt.py",
+        '    if "." not in text:\n        return False\n',
+        "    if False:\n        return False\n",
+    ),
+    Mutation(
+        "judge_text 不跳围栏（围栏示例的判定传染 A#）", "check_prompt.py",
+        "        if not fenced[j] and (j == 0 or not NESTED_ITEM_RE.match(line))",
+        "        if (j == 0 or not NESTED_ITEM_RE.match(line))",
+    ),
     # ---------- 闸门②：技能定义 ----------
     Mutation(
         "三态接受词退回裸 go/接（（Go 语言与不接（kill）都算接住）", "check_skill.py",
@@ -126,6 +158,46 @@ MUTATIONS: list[Mutation] = [
         'WHEN_MARKERS = [\n    "如果", "若用户", "用户说", "用户给出", "用户抛", "你需要",',
         'WHEN_MARKERS = [\n    "当",\n    "如果", "若用户", "用户说", "用户给出", "用户抛", "你需要",',
     ),
+    Mutation(
+        "单引号 YAML 的 '' 不再还原成 '（合法描述变 E6）", "check_skill.py",
+        '    if len(value) >= 2 and value[0] == value[-1] == "\'":\n'
+        '        return value[1:-1].replace("\'\'", "\'")',
+        '    if len(value) >= 2 and value[0] == value[-1] == "\'":\n'
+        '        return value[1:-1]',
+    ),
+    Mutation(
+        "纯标量的空行被当成标量结束（第二段的边界漏读）", "check_skill.py",
+        "                k = j + 1\n"
+        "                while k < len(lines) and not lines[k].strip():\n"
+        "                    k += 1\n"
+        "                if (k < len(lines) and lines[k][:1] in (\" \", \"\\t\")\n"
+        "                        and not FRONTMATTER_KEY_RE.match(lines[k])):\n"
+        "                    parts.append(\"\")\n"
+        "                    j = k\n"
+        "                    continue\n"
+        "                break",
+        "                break",
+    ),
+    Mutation(
+        "嵌套围栏被内层三反引号提前关闭（样例文字漏进正文）", "check_skill.py",
+        "        elif (match is not None and match.group(1)[0] == fence[0]\n"
+        "              and len(match.group(1)) >= fence[1]\n"
+        "              and not stripped[len(match.group(1)):].strip()):\n"
+        "            fence = None",
+        "        elif match is not None:\n            fence = None",
+    ),
+    Mutation(
+        "`./AGENTS.md` 不算同目录依赖（漏报 E7）", "check_skill.py",
+        "        referenced = [rel for rel, pattern in SIBLING_PATTERNS.items()\n"
+        "                      if pattern.search(_sibling_prose(prose))]",
+        "        referenced = [rel for rel, pattern in SIBLING_PATTERNS.items()\n"
+        "                      if pattern.search(prose)]",
+    ),
+    Mutation(
+        "中文标记子串匹配区分大小写（句首 Don't use 漏认）", "check_skill.py",
+        "    return fold_ws(marker).casefold() in fold_ws(text).casefold()",
+        "    return fold_ws(marker) in fold_ws(text)",
+    ),
     # ---------- 闸门③：跨段一致性 ----------
     Mutation(
         "C1 不查不存在的编号", "check_contract.py",
@@ -143,10 +215,31 @@ MUTATIONS: list[Mutation] = [
         "        if True:",
     ),
     Mutation(
-        "C5 认为命令永远给了", "check_contract.py",
-        "    return bool(cp.CODE_SPAN_RE.search(text) or SCRIPT_RE.search(text)"
-        " or COMMAND_HINT_RE.search(text))",
-        "    return True",
+        "C5 把任意行内代码当命令（数据文件名也算给了命令）", "check_contract.py",
+        "    return any(_code_span_is_command(m.group(0)) for m in cp.CODE_SPAN_RE.finditer(text))",
+        "    return bool(cp.CODE_SPAN_RE.search(text))",
+    ),
+    Mutation(
+        "纸张规格退回裸字「出」（R9 出错被当成规格吞掉）", "check_contract.py",
+        '_PAPER_SPEC_WORDS = cp.PAPER_SPEC_WORDS + ("出图", "出片")',
+        '_PAPER_SPEC_WORDS = ("出",)',
+    ),
+    Mutation(
+        "C3 不再认反向语序的否定句（「未确认项：无」被当成待办）", "check_contract.py",
+        "    text = _DENY_UNCONFIRMED_RE.sub(\"\", text)\n"
+        "    text = _DENY_UNCONFIRMED_POST_RE.sub(\"\", text)",
+        "    text = _DENY_UNCONFIRMED_RE.sub(\"\", text)\n"
+        "    text = text",
+    ),
+    Mutation(
+        "C1 不再跳过缩进代码块里的样例编号", "check_contract.py",
+        "    indented = cp.indented_code_lines(lines, fenced)",
+        "    indented = [False] * len(lines)",
+    ),
+    Mutation(
+        "C5 命令名后面跟什么不管了（技术栈名字算命令）", "check_contract.py",
+        '    r"(?=\\s+(?!\\d)[A-Za-z0-9_./\\\\~-])",',
+        '    r"\\b",',
     ),
 ]
 
@@ -189,6 +282,42 @@ def failed_case_names(output: str) -> list[str]:
     return names
 
 
+def _temp_root() -> Path:
+    """挑一个**不在仓库里**、且真的可写的临时根目录。
+
+    背景（第 5 轮审计 R5-extra-01）：`tempfile.gettempdir()` 在用户 TEMP 不可写时会**静默回退到
+    当前目录**。本项目实测（py3.9.13 嵌入式解释器 + 用户名含单引号的本机）回退到了 `prompt-forge/`
+    仓库根，于是 `TemporaryDirectory(prefix="pf-mutate-")` 在仓库里建目录 —— 正常收尾能删干净，
+    但进程被 Ctrl+C / 超时 / 崩溃打断就留下一个空目录，污染 `git status`。
+    这里逐个候选根做可写探针，并跳过仓库及仓库内部，保证变异镜像永远落在仓库外。
+    """
+    candidates: list[Path] = []
+    for key in ("TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(key)
+        if value:
+            candidates.append(Path(value))
+    candidates.append(Path(tempfile.gettempdir()))
+    candidates.append(Path.home() / ".cache")
+    candidates.append(ROOT.parent)   # 兜底：仓库的上一级（仍不在仓库里）
+    repo = ROOT.resolve()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved == repo or repo in resolved.parents:
+            continue
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+            probe = resolved / "pf-mutate-probe.tmp"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError:
+            continue
+        return resolved
+    raise SystemExit("ERROR: 找不到可写的临时目录（TMPDIR / TEMP / TMP / HOME 都不可用）")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="变异检验：确认三道闸门的 --selftest 不是空跑")
     parser.add_argument("filters", nargs="*", help="只跑名字里含这些子串的变异")
@@ -211,7 +340,10 @@ def main() -> int:
     print(f"变异检验：{len(selected)} 个变异，涉及 {len(scripts)} 个脚本")
 
     failed: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="pf-mutate-") as tmp:
+    tmp_root = _temp_root()
+    print(f"临时目录：{tmp_root}")
+    tmp = tempfile.mkdtemp(prefix="pf-mutate-", dir=str(tmp_root))
+    try:
         # 1) 基线：未变异的自测必须全绿。
         print("\n--- 基线（未变异）---")
         baseline = build_mirror(Path(tmp) / "baseline")
@@ -254,6 +386,9 @@ def main() -> int:
                 print(f"FAIL  [{index:02d}] {mutation}: rc=0 —— 自测没抓住这个变异")
                 failed.append(mutation.name)
                 print("      建议：给这个脚本的 --selftest 补一条会因此变红的用例")
+    finally:
+        # 无论正常结束还是被中断，都不要把镜像留在磁盘上（仓库外也一样，避免堆垃圾）。
+        shutil.rmtree(tmp, ignore_errors=True)
 
     if failed:
         print(f"\n结果：{len(failed)} 个变异没被抓住或没能生效 —— {', '.join(failed)}")

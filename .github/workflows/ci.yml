@@ -56,10 +56,23 @@ jobs:
             "templates/提示词骨架.md"
           python -X utf8 -B scripts/check_skill.py SKILL.md
 
-      - name: 反例必须被拦下（非零退出）
+      - name: 反例必须被拦下（非零退出且输出里真的报 ERROR）
         run: |
-          if python -X utf8 -B scripts/check_prompt.py "examples/反例-模糊需求.prompt.md"; then
+          ref="examples/反例-模糊需求.prompt.md"
+          if [ ! -f "$ref" ]; then
+            echo "::error::$ref 不存在 —— 这一步没法证明闸门① 在拦东西"
+            exit 1
+          fi
+          if out=$(python -X utf8 -B scripts/check_prompt.py "$ref" 2>&1); then
+            echo "$out"
             echo "::error::反例-模糊需求.prompt.md 竟然 0 ERROR 通过 —— 闸门① 漏了"
+            exit 1
+          else
+            rc=$?
+          fi
+          echo "$out"
+          if ! printf '%s\n' "$out" | grep -q 'ERROR'; then
+            echo "::error::反例退出码 $rc，但输出里一条 ERROR 都没有 —— 不是闸门① 判红的（文件缺失/脚本崩溃？）"
             exit 1
           fi
 

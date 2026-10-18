@@ -59,15 +59,26 @@ C_ERROR_CODES = ("C1", "C3")
 #: 能被 `pf-ignore` 豁免的 C 码（WARN）。
 C_WARN_CODES = ("C2", "C4", "C5")
 #: 纸张规格后缀：`A4 纸` / `A3 幅面` / `A0/A1 幅面` / `A2 出图` 里的编号不是验收编号（审计 P25）。
-_PAPER_SPEC_TAIL_RE = re.compile(r"^\s*(?:的\s*)?(?:/\s*[A-Za-z]?\d+\s*)*(?:纸|图纸|幅面|幅|开本|出)")
+#: 只认**完整的词**：旧版把裸「出」也算后缀，于是 `R9 出错` / `A9 出现` / `R9 出发` 被当成纸张规格
+#: 静默吞掉，引用了不存在的编号照样绿灯（第 5 轮审计 R5-PF-G3-01）。词表 = 闸门① 的纸张词 + 打印用语。
+_PAPER_SPEC_WORDS = cp.PAPER_SPEC_WORDS + ("出图", "出片")
+_PAPER_SPEC_TAIL_RE = re.compile(
+    r"^\s*(?:的\s*)?(?:/\s*[A-Za-z]?\d+\s*)*(?:"
+    + "|".join(re.escape(word) for word in sorted(_PAPER_SPEC_WORDS, key=len, reverse=True))
+    + ")"
+)
 
 LABEL_REQ = "4 需求（R#）"
 LABEL_ACC = "7 验收标准（A#）"
 
 #: 「判定：命令」时必须看得出跑什么：反引号里的命令、脚本路径，或者一个命令名。
+#: 命令名后面必须跟一个 ASCII 参数（`python tidy.py` / `git status` / `npm test` / `go build`），
+#: 否则「用 Python 写的那套流程」「Go 语言」「Python 3.12 环境」这类技术栈闲聊会被当成命令，
+#: 没给命令的验收条目照样绿灯（第 5 轮审计 R5-PF-G3-04）。参数以数字开头视为版本号，不算命令。
 COMMAND_HINT_RE = re.compile(
     r"(?<![\w.-])(?:python|py|node|npm|pnpm|npx|git|bash|zsh|sh|pwsh|powershell|make|cargo|go|dotnet|"
-    r"java|pytest|ruff|mypy|deno|bun|curl|sqlite3)\b",
+    r"java|pytest|ruff|mypy|deno|bun|curl|sqlite3)"
+    r"(?=\s+(?!\d)[A-Za-z0-9_./\\~-])",
     re.IGNORECASE,
 )
 #: 「判定：命令」里认的可执行文件 / 脚本路径；数据文件（.csv/.json/.xlsx）不算命令（审计 P33）。
@@ -75,6 +86,10 @@ SCRIPT_RE = re.compile(
     r"[\w./\\-]+\.(?:py|sh|ps1|bat|cmd|js|mjs|cjs|ts|exe)\b",
     re.IGNORECASE,
 )
+#: 反引号片段要算「能粘贴的命令」还得像命令：命令名 + 参数、脚本/可执行路径，或 `./` 开头的路径。
+#: 只认相对路径前缀，不认 `D:\Downloads` 这类数据目录 —— 否则 A# 里随手写的 `demo.part` /
+#: `hidden.txt` 会被当成命令，明明没给命令的条目照样绿灯（第 5 轮独立复验 N1，与 P33「数据文件不算命令」同口径）。
+_COMMANDISH_PATH_RE = re.compile(r"^\.{1,2}[/\\]")
 
 #: C4 比对时要丢掉的词：这些词在「停下来问人」和「未确认」两边本来就会出现，不算对应关系。
 STOP_WORDS = {
@@ -129,11 +144,18 @@ def _definition_end(line: str, letter: str) -> int:
     return (len(line) - len(stripped)) + (len(stripped) - len(probe)) + match.end()
 
 
-def check_refs(lines: list[str], fenced: list[bool], known: dict[str, set[int]]) -> list[cp.Finding]:
-    """C1：全文里出现的编号引用，必须在对应段落里真的定义过。"""
+def check_refs(
+    lines: list[str], fenced: list[bool], indented: list[bool], known: dict[str, set[int]]
+) -> list[cp.Finding]:
+    """C1：全文里出现的编号引用，必须在对应段落里真的定义过。
+
+    围栏代码块与缩进代码块都跳过：那是「期望输出示例」，里面的编号是别人的文字，
+    不是这份文档的引用（第 5 轮审计 R5-PF-G3-03；闸门① 早就在用 `fence_lines` +
+    `indented_code_lines` 屏蔽这两类代码样例了）。
+    """
     findings: list[cp.Finding] = []
     for idx, line in enumerate(lines):
-        if fenced[idx]:
+        if fenced[idx] or indented[idx]:
             continue
         clean = cp.strip_comments(line)
         if not clean.strip():
@@ -210,11 +232,24 @@ def check_step_coverage(
 _DENY_UNCONFIRMED_RE = re.compile(
     r"(?:无|没有|暂无|并未|不存在|无需|不需|不要|不必)[^。；\n]{0,6}未确认"
 )
+#: 语序反过来的否定式：`未确认项：无。` / `未确认：暂无` / `未确认项为无` 同样是「没有未确认」，
+#: 不是一条待办。旧版只认否定词在前的语序，于是把明确写着「未确认项：无」的文档当成一条未确认，
+#: 第 11 段再写「无」就报 C3 ERROR —— 说了没有未确认项的文档被自己的闸门判失败
+#: （第 5 轮审计 R5-PF-G3-02）。否定词后面必须是句末/标点/括号收尾：`无需…`、`无法…` 不算否定式。
+_DENY_UNCONFIRMED_POST_RE = re.compile(
+    r"未确认(?:项|条|点)?\s*[:：]?\s*(?:为)?\s*(?:无|没有|暂无|空|不存在)"
+    r"(?=\s*(?:$|[。．.;；，,、）)]|（))"
+)
 
 
 def _mentions_unconfirmed(text: str) -> bool:
-    """这一行是不是真的在说「有未确认的东西」——否定句不算（审计 P26）。"""
-    return "未确认" in _DENY_UNCONFIRMED_RE.sub("", text)
+    """这一行是不是真的在说「有未确认的东西」——否定句（两种语序）都不算。
+
+    审计 P26 / 第 5 轮审计 R5-PF-G3-02。
+    """
+    text = _DENY_UNCONFIRMED_RE.sub("", text)
+    text = _DENY_UNCONFIRMED_POST_RE.sub("", text)
+    return "未确认" in text
 
 
 def _assumption_block(lines: list[str], idx: int, lo: int, hi: int) -> str:
@@ -277,9 +312,29 @@ def check_open_items(
     return findings
 
 
+def _code_span_is_command(span: str) -> bool:
+    """反引号片段像不像一条能直接粘贴的命令（第 5 轮独立复验 N1）。"""
+    body = span.strip("`").strip()
+    if not body:
+        return False
+    # 骨架模板里 `判定：命令 `<可复制执行的命令>`` 的占位符是给作者的填写位，不是数据文件名。
+    if re.fullmatch(r"<[^<>]*>", body):
+        return True
+    return bool(
+        COMMAND_HINT_RE.search(body) or SCRIPT_RE.search(body) or _COMMANDISH_PATH_RE.match(body)
+    )
+
+
 def has_command(text: str) -> bool:
-    """条目里有没有能直接粘贴的命令：反引号里的命令、脚本路径，或者一个命令名。"""
-    return bool(cp.CODE_SPAN_RE.search(text) or SCRIPT_RE.search(text) or COMMAND_HINT_RE.search(text))
+    """条目里有没有能直接粘贴的命令：像命令的反引号片段、脚本路径，或者一个命令名。
+
+    反引号里的**数据文件名**（`demo.part` / `hidden.txt`）不算命令：只要条目里出现反引号就放行，
+    等于把「没给命令」的验收条目全放过（第 5 轮独立复验 N1）。
+    """
+    without_code = cp.CODE_SPAN_RE.sub(lambda m: " " * len(m.group(0)), text)
+    if SCRIPT_RE.search(without_code) or COMMAND_HINT_RE.search(without_code):
+        return True
+    return any(_code_span_is_command(m.group(0)) for m in cp.CODE_SPAN_RE.finditer(text))
 
 
 def check_judgements(
@@ -317,13 +372,14 @@ def check_contract(
     text_lines = cp.split_lines(raw)
     lines = cp.split_lines(cp.strip_comments(raw))
     fenced = cp.fence_lines(lines)
+    indented = cp.indented_code_lines(lines, fenced)
     sections, _preamble = cp.split_sections(lines)
     requirements, _dups_r = cp.collect_items(lines, "R")
     acceptances, _dups_a = cp.collect_items(lines, "A")
     known = {"R": set(requirements), "A": set(acceptances)}
 
     findings: list[cp.Finding] = []
-    findings.extend(check_refs(lines, fenced, known))
+    findings.extend(check_refs(lines, fenced, indented, known))
     findings.extend(check_step_coverage(lines, fenced, sections, known["R"]))
     findings.extend(check_open_items(lines, fenced, sections))
     findings.extend(check_judgements(lines, fenced, acceptances))
@@ -447,10 +503,27 @@ def selftest() -> int:
                      "## 4. 需求（R#）\n\n- 打印名单按 A4 纸纵向排版，页面规格写 `A4`。\n"
                      "- 交付 A0/A1 幅面图纸，以及图纸按 A2 出图。"),
          set(), set(), set(), ""),
+        ("C1 编号后面跟「出错」不算纸张规格（第 5 轮 R5-PF-G3-01）",
+         lambda: sub(base, step2, step2.replace("（对应 R2）", "（对应 R2、R9 出错就回滚）")),
+         {"C1"}, set(), set(), ""),
+        ("C1 纸张规格「A9 出图」「A8 出片」不算引用",
+         lambda: sub(base, "## 4. 需求（R#）",
+                     "## 4. 需求（R#）\n\n- 打印名单按 A2 出图纸、A9 出图与 A8 出片排版。"),
+         set(), set(), set(), ""),
+        ("C1 缩进代码块里的示例编号不算引用（第 5 轮 R5-PF-G3-03）",
+         lambda: sub(base, "## 9. 执行步骤",
+                     "期望输出（示例）：\n\n    见 R9 的旧版格式\n\n## 9. 执行步骤"),
+         set(), set(), set(), ""),
         ("C3/C4「无未确认项」是否定句，不算未确认（第 11 段写「无」也不报 C3）",
          lambda: sub(sub(base,
                          "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
                          "- 无未确认项：全部假设已在阶段 2 与用户拍板确认。"),
+                     section11, "无。"),
+         set(), set(), set(), ""),
+        ("C3「未确认项：无。」是反向语序的否定式，第 11 段写「无」不报 C3（第 5 轮 R5-PF-G3-02）",
+         lambda: sub(sub(base,
+                         "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                         "- 未确认项：无。"),
                      section11, "无。"),
          set(), set(), set(), ""),
         ("C4 多行假设按整块取关键词（未确认写在续行）",
@@ -466,6 +539,22 @@ def selftest() -> int:
         ("C5 判定：人工 里出现「命令」两个字不算判定：命令",
          lambda: sub(base, "判定：人工 看 main 分支。",
                      "判定：人工 由产品经理看截图确认，这条不用跑命令。"),
+         set(), set(), set(), ""),
+        ("C5 判定：命令 里只提技术栈名字不算给了命令（第 5 轮 R5-PF-G3-04）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 用 Python 写的那套流程跑一遍，看日志两行。"),
+         set(), {"C5"}, set(), ""),
+        ("C5 判定：命令 里是命令名 + 参数就不报",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 先跑 git status 确认工作树干净。"),
+         set(), set(), set(), ""),
+        ("C5 数据文件名在反引号里也不算命令（第 5 轮复验 N1）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 看 `demo.part` 与 `hidden.txt` 两行日志，其余照旧。"),
+         set(), {"C5"}, set(), ""),
+        ("C5 真命令在反引号里仍算给了命令（防过度收紧）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 跑 `python scripts/borrow.py --dry-run` 看退出码。"),
          set(), set(), set(), ""),
         ("豁免注释：给 ERROR 码（C1）写 pf-ignore 报 E11",
          lambda: sub(base, "## 5. 非目标",

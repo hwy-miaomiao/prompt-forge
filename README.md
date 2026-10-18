@@ -59,7 +59,7 @@ flowchart LR
 5. **提示词是给陌生人看的**：把本次对话全删掉，另一个 AI 只读这个文件也要能开工。
 6. **每条规矩都标出处**：`references/方法论出处.md` 里逐条写明是官方文档、行业标准，还是本仓库自己的设计选择 —— 哪些是抄的、哪些是拍的，一目了然。
 7. **闸门自己也被检验**：三道闸门都是零依赖脚本，`--selftest` 拿真实正反例跑；另有 `scripts/mutate_checks.py`
-   把闸门源码改坏 15 处，每一处都必须让对应的自测变红 —— 防的是"自测空跑、看着全绿其实什么都没查"。
+   把闸门源码改坏 30 处，每一处都必须让对应的自测变红 —— 防的是"自测空跑、看着全绿其实什么都没查"。
 
 ## 快速开始
 
@@ -91,7 +91,7 @@ python scripts/check_prompt.py --selftest
 # PASS  例2-班级报名网站.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  反例-模糊需求.prompt.md: 16 ERROR（期望 >=5 ERROR）
 # PASS  templates/提示词骨架.md: 0 ERROR, 0 WARN（期望 0 ERROR 0 WARN）
-# …… 共 68 个用例 = 这 5 个真实文件 + 63 个内置回归（标题绑定与抢绑、模糊词豁免、
+# …… 共 90 个用例 = 这 5 个真实文件 + 85 个内置回归（标题绑定与抢绑、模糊词豁免、
 #      围栏里的 R# 样例不算条目 / 围栏里的标题不算段落 / ~~~ 也是围栏、
 #      围栏里的 TODO 仍报 E10、A# 的引用写在续行也算数、W8 同义标题歧义、
 #      豁免注释只吃同一段的 WARN / 缺理由与写错码报 E11 / --no-ignore 时豁免失效
@@ -103,18 +103,18 @@ python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 # PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
 # PASS  [示例] good-minimal: ERROR [] WARN []（期望 ERROR [] WARN []）
-# …… 共 45 个用例（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑）
-#      = 真实 SKILL.md + 9 个真实示例 + 33 个内置闸门用例（含行号、BOM、长句触发、
+# …… 共 50 个用例（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑）
+#      = 真实 SKILL.md + 9 个真实示例 + 38 个内置闸门用例（含行号、BOM、长句触发、
 #      `go` 不被 `good` / `Go 语言` 命中、「不接（kill）」不算写了「接」等）
 
 # 闸门③：检查段与段之间对不对得上（需求↔步骤、未确认↔停下条件、判定↔命令）
 python scripts/check_contract.py --selftest
 # PASS  [闸门③] 基准件：闸门① 的自测夹具跨段也对得上: ERROR 码 []（期望 []） WARN 码 []（期望 []）
 # PASS  [闸门③] C1 引用了不存在的需求号: ERROR 码 ['C1']（期望 ['C1']） WARN 码 []（期望 []）
-# …… 共 16 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例
+# …… 共 24 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例
 #      （C1/C3 是 ERROR，C2/C4/C5 是 WARN；最后两条是「没东西可查时要出范围说明」）
 
-# 变异检验：把闸门源码改坏 15 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
+# 变异检验：把闸门源码改坏 30 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
 python scripts/mutate_checks.py
 ```
 
@@ -182,7 +182,7 @@ python scripts/check_prompt.py 输出/<slug>/prompt.md
 
 ```bash
 python scripts/check_skill.py SKILL.md
-python scripts/check_skill.py --selftest   # 45 个用例（2 个链接安装用例：Linux 符号链接 / Windows junction 真跑）
+python scripts/check_skill.py --selftest   # 50 个用例（2 个链接安装用例：Linux 符号链接 / Windows junction 真跑）
 ```
 
 查的是「自动识别」这件事能不能成立：
@@ -205,7 +205,7 @@ python scripts/check_skill.py --selftest   # 45 个用例（2 个链接安装用
 
 ```bash
 python scripts/check_contract.py 输出/<slug>/prompt.md
-python scripts/check_contract.py --selftest   # 16 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例
+python scripts/check_contract.py --selftest   # 24 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例
 ```
 
 段落本身写得对（那是闸门① 的活）不等于**段与段对得上**：
@@ -240,7 +240,7 @@ prompt-forge/
 ├── SKILL.md             # 装成 Agent Skill 时的入口
 ├── CLAUDE.md            # 让 Claude Code 也读 AGENTS.md
 ├── README.md
-├── .github/workflows/   # CI：三份自测 + 变异检验 + 自家资产实跑 + LF 检查
+├── .github/workflows/   # CI：三份自测 + 变异检验 + 三件仓库级检查（资产过闸门 / 反例被拦下 / 全 LF）
 ├── references/          # 需求问询 · 参考样例库 · 提示词结构 · 模糊词换算表 · 校验清单 · 踩坑记录 · 方法论出处
 ├── templates/           # 提示词骨架 · 需求确认模板
 ├── scripts/
@@ -307,7 +307,7 @@ prompt-forge 的价值在于**流程约束**：先分诊、再问、给参考、
 python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 python scripts/check_contract.py --selftest
-python scripts/mutate_checks.py     # 动了闸门源码就要跑：15 处变异必须全部被抓住
+python scripts/mutate_checks.py     # 动了闸门源码就要跑：30 处变异必须全部被抓住
 ```
 
 新增检查项时请补上反例，并且**先用真实文件跑一遍确认期望的 ERROR 码** —— 照直觉写期望值，
@@ -319,6 +319,7 @@ python scripts/mutate_checks.py     # 动了闸门源码就要跑：15 处变异
 自查不用装 Python：解压官方嵌入式包就能跑（脚本零依赖，8.6 MB）：
 
 ```bash
+# macOS / Linux
 curl -LO https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip
 unzip -q python-3.9.13-embed-amd64.zip -d py39
 ./py39/python -X utf8 -B scripts/check_prompt.py --selftest
@@ -327,8 +328,16 @@ unzip -q python-3.9.13-embed-amd64.zip -d py39
 ./py39/python -X utf8 -B scripts/mutate_checks.py
 ```
 
-Windows PowerShell 上把最后四行换成
-`& .\py39\python.exe -X utf8 -B scripts\check_prompt.py --selftest`（其余同理）。
+Windows PowerShell 上换用下面这段（Windows 10+ 自带 `curl.exe`；没有 `unzip`，用 `Expand-Archive`）：
+
+```powershell
+curl.exe -LO https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip
+Expand-Archive python-3.9.13-embed-amd64.zip -DestinationPath py39
+& .\py39\python.exe -X utf8 -B scripts\check_prompt.py --selftest
+& .\py39\python.exe -X utf8 -B scripts\check_skill.py --selftest
+& .\py39\python.exe -X utf8 -B scripts\check_contract.py --selftest
+& .\py39\python.exe -X utf8 -B scripts\mutate_checks.py
+```
 
 ## 协议
 
