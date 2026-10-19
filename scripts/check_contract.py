@@ -75,12 +75,30 @@ LABEL_ACC = "7 验收标准（A#）"
 #: 命令名后面必须跟一个 ASCII 参数（`python tidy.py` / `git status` / `npm test` / `go build`），
 #: 否则「用 Python 写的那套流程」「Go 语言」「Python 3.12 环境」这类技术栈闲聊会被当成命令，
 #: 没给命令的验收条目照样绿灯（第 5 轮审计 R5-PF-G3-04）。参数以数字开头视为版本号，不算命令。
+#: 第 6 轮审计 R6-PF-G3-01：`make` / `go` / `sh` 这些命令名本身也是普通英文词，`make sure` /
+#: `go to` / `sh all` 会被当成命令 —— 命令名后面跟英文虚词时不算命令行。第 6 轮审计
+#: R6-PF-G3-04（round5 REPORT:74 的 backlog）：补齐 yarn/pip/docker 等常见构建与包管理工具。
+_COMMAND_WORDS = (
+    "python[0-9.]*|py[0-9.]*|node|npm|pnpm|npx|yarn|bun|deno|git|bash|zsh|sh|pwsh|powershell|"
+    "make|cargo|go|dotnet|java|javac|pytest|ruff|mypy|curl|wget|sqlite3|pip[0-9.]*|uv|poetry|"
+    "docker|docker-compose|kubectl|helm|terraform|ansible|gcc|g\\+\\+|clang|rustc|cmake|ninja|"
+    "mvn|gradle|ruby|gem|php|perl|julia|Rscript|ssh|scp|rsync|tar|zip|unzip|ffmpeg|ffprobe|7z"
+)
+#: 命令名后面紧跟这些英文虚词时是正文句子，不是命令行（`make sure` / `go to` / `sh all`）。
+_COMMAND_STOPWORDS = (
+    "to|sure|the|a|an|and|or|of|in|on|with|is|are|it|this|that|for|from|as|at|be|been|not|no|"
+    "all|some|any|if|but|so|do|does|did|has|have|had|was|were|will|would|can|could|should|may|"
+    "might|must|you|your|we|our|they|their|he|she|his|her|me|my|us|them|these|those|there|here|"
+    "what|which|who|how|why|when|where|very|just|also|only|more|most|less|least|up|down|out|off|"
+    "over|under|again|once|too|both|each|few|other|such|same|own"
+)
 COMMAND_HINT_RE = re.compile(
-    r"(?<![\w.-])(?:python|py|node|npm|pnpm|npx|git|bash|zsh|sh|pwsh|powershell|make|cargo|go|dotnet|"
-    r"java|pytest|ruff|mypy|deno|bun|curl|sqlite3)"
-    r"(?=\s+(?!\d)[A-Za-z0-9_./\\~-])",
+    r"(?<![\w.-])(?:" + _COMMAND_WORDS + r")"
+    r"(?=\s+(?!(?:" + _COMMAND_STOPWORDS + r")\b)(?!\d)[A-Za-z0-9_./\\~-])",
     re.IGNORECASE,
 )
+#: 反引号里只写一个命令名（`` `pytest` ``）也是能直接粘贴的命令（第 6 轮审计 R6-PF-G3-05 补覆盖）。
+_BARE_COMMAND_RE = re.compile(r"(?:" + _COMMAND_WORDS + r")", re.IGNORECASE)
 #: 「判定：命令」里认的可执行文件 / 脚本路径；数据文件（.csv/.json/.xlsx）不算命令（审计 P33）。
 SCRIPT_RE = re.compile(
     r"[\w./\\-]+\.(?:py|sh|ps1|bat|cmd|js|mjs|cjs|ts|exe)\b",
@@ -167,8 +185,10 @@ def check_refs(
             for match in re.finditer(rf"(?<![A-Za-z0-9_]){letter}(\d+)(?!\d)", clean):
                 if match.start() < marker_end:
                     continue  # 这一处是条目自己的编号，不是引用
-                if _PAPER_SPEC_TAIL_RE.match(clean[match.end():]):
-                    continue  # `A4 纸` / `A0/A1 幅面` / `A2 出图` 是纸张规格，不是验收编号（审计 P25）
+                # 纸张规格只有 A 系列（A0/A1…）：`A4 纸` / `A2 出图` 里的编号不是验收编号（审计 P25）；
+                # R# 永远不是纸张规格，`R9 出图流程` 必须按引用查（第 6 轮审计 R6-PF-G3-02）。
+                if letter == "A" and _PAPER_SPEC_TAIL_RE.match(clean[match.end():]):
+                    continue
                 num = int(match.group(1))
                 if num not in known[letter]:
                     findings.append(cp.Finding(
@@ -237,16 +257,22 @@ _DENY_UNCONFIRMED_RE = re.compile(
 #: 第 11 段再写「无」就报 C3 ERROR —— 说了没有未确认项的文档被自己的闸门判失败
 #: （第 5 轮审计 R5-PF-G3-02）。否定词后面必须是句末/标点/括号收尾：`无需…`、`无法…` 不算否定式。
 _DENY_UNCONFIRMED_POST_RE = re.compile(
-    r"未确认(?:项|条|点)?\s*[:：]?\s*(?:为)?\s*(?:无|没有|暂无|空|不存在)"
-    r"(?=\s*(?:$|[。．.;；，,、）)]|（))"
+    r"未确认(?:项|条|点)?\s*[:：]?\s*(?:为)?\s*"
+    r"(?:无|没有|暂无|空|不存在|不适用|不涉及|n/?a|none|零|0)\s*(?:条|项|个|处)?"
+    r"(?=\s*(?:$|[。．.;；，,、）)]|（))",
+    re.IGNORECASE,
 )
+#: 「待确认：…」是「未确认：…」的同义写法（第 6 轮审计 R6-PF-G3-03 一并归一，免得换个词就假绿）。
+_PENDING_ALIAS_RE = re.compile(r"待确认(?=\s*(?:[:：]|项|条|点))")
 
 
 def _mentions_unconfirmed(text: str) -> bool:
     """这一行是不是真的在说「有未确认的东西」——否定句（两种语序）都不算。
 
-    审计 P26 / 第 5 轮审计 R5-PF-G3-02。
+    审计 P26 / 第 5 轮审计 R5-PF-G3-02；反向语序的「不适用 / N/A / 0 条 / 零」也算否定式
+    （第 6 轮审计 R6-PF-G3-03）。
     """
+    text = _PENDING_ALIAS_RE.sub("未确认", text)
     text = _DENY_UNCONFIRMED_RE.sub("", text)
     text = _DENY_UNCONFIRMED_POST_RE.sub("", text)
     return "未确认" in text
@@ -319,6 +345,9 @@ def _code_span_is_command(span: str) -> bool:
         return False
     # 骨架模板里 `判定：命令 `<可复制执行的命令>`` 的占位符是给作者的填写位，不是数据文件名。
     if re.fullmatch(r"<[^<>]*>", body):
+        return True
+    # 反引号里只写命令名（`` `pytest` ``）也是能粘贴的命令；数据文件名（`demo.part`）不匹配命令名表。
+    if _BARE_COMMAND_RE.fullmatch(body):
         return True
     return bool(
         COMMAND_HINT_RE.search(body) or SCRIPT_RE.search(body) or _COMMANDISH_PATH_RE.match(body)
@@ -561,6 +590,56 @@ def selftest() -> int:
                      "## 5. 非目标\n\n<!-- pf-ignore: C1 这条引用先不管 -->"),
          {"E11"}, set(), set(), ""),
         ("豁免注释：同段的 C2 被吃掉", c2_exempt, set(), set(), {"C2"}, ""),
+        # —— 第 6 轮审计撞出来的假绿/假红（R6-PF-G3-01/02/03/04/05）——
+        ("C1 R# 后面跟「出图」不算纸张规格（第 6 轮 R6-PF-G3-02）",
+         lambda: sub(base, step2, step2.replace("（对应 R2）", "（对应 R2、R9 出图流程）")),
+         {"C1"}, set(), set(), ""),
+        ("C5 普通英文词 make sure / go to 不算命令（第 6 轮 R6-PF-G3-01）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 先 make sure 数据完整，再 go to 下一步继续。"),
+         set(), {"C5"}, set(), ""),
+        ("C5 命令名表补齐 yarn/pip/docker（第 6 轮 R6-PF-G3-04）",
+         lambda: sub(base, "判定：人工 看 main 分支。", "判定：命令 跑 `yarn test` 看退出码。"),
+         set(), set(), set(), ""),
+        ("C5 make test / go build 仍算命令（防过度收紧）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 先 make test，再 go build ./... 看结果。"),
+         set(), set(), set(), ""),
+        ("C3「未确认：不适用」是否定式（第 6 轮 R6-PF-G3-03）",
+         lambda: sub(sub(base,
+                        "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                        "- 未确认：不适用。"),
+                    section11, "无。"),
+         set(), set(), set(), ""),
+        ("C3「未确认：N/A」是否定式",
+         lambda: sub(sub(base,
+                        "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                        "- 未确认：N/A。"),
+                    section11, "无。"),
+         set(), set(), set(), ""),
+        ("C3「未确认项：0 条」是否定式",
+         lambda: sub(sub(base,
+                        "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                        "- 未确认项：0 条。"),
+                    section11, "无。"),
+         set(), set(), set(), ""),
+        ("C3「待确认：…」按未确认处理（第 11 段空着要报 C3）",
+         lambda: sub(sub(base,
+                        "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                        "- 待确认：导出格式还没定。"),
+                    section11, "无。"),
+         {"C3"}, set(), set(), ""),
+        ("C5 骨架占位符 `<可复制执行的命令>` 不算没给命令（第 6 轮 R6-PF-G3-05）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 `<可复制执行的命令>`。"),
+         set(), set(), set(), ""),
+        ("C5 无后缀相对路径 `./gradlew` 算命令（第 6 轮 R6-PF-G3-05）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 跑 `./gradlew` 的 build 任务。"),
+         set(), set(), set(), ""),
+        ("C5 反引号里只写命令名也算给了命令",
+         lambda: sub(base, "判定：人工 看 main 分支。", "判定：命令 `pytest`，看退出码。"),
+         set(), set(), set(), ""),
     ]
 
     failed = 0

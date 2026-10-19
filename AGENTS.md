@@ -240,12 +240,12 @@ python scripts/check_contract.py <输出目录>/prompt.md
 | 闸门 | 通过条件 |
 | --- | --- |
 | `check_prompt.py` | **0 ERROR**（WARN 可接受，但要逐条说明） |
-| `python scripts/check_prompt.py --selftest` | 正例 0 ERROR、反例 ≥5 ERROR、`templates/提示词骨架.md` 也是 **0 ERROR 0 WARN**；90 个用例全过（5 个真实文件 + 85 个内置回归；改了脚本 / 示例 / 模板必须重跑） |
+| `python scripts/check_prompt.py --selftest` | 正例 0 ERROR、反例 ≥5 ERROR、`templates/提示词骨架.md` 也是 **0 ERROR 0 WARN**；103 个用例全过（5 个真实文件 + 98 个内置回归；改了脚本 / 示例 / 模板必须重跑） |
 | `check_skill.py <SKILL.md>` | **0 ERROR**（检查本技能自己的定义：name 与目录名一致、description 能在 500 字内被自动识别、正文写了分诊与默认档；改 `SKILL.md` 后必须重跑） |
-| `python scripts/check_skill.py --selftest` | 仓库里真实的 `SKILL.md` 0 ERROR、每个反例用例报出的 ERROR 码与预期一致；50 个用例全过（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑，只有两者都建不了的环境才 SKIP） |
+| `python scripts/check_skill.py --selftest` | 仓库里真实的 `SKILL.md` 0 ERROR、每个反例用例报出的 ERROR 码与预期一致；56 个用例全过（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑，只有两者都建不了的环境才 SKIP） |
 | `check_contract.py` | **0 ERROR**（跨段一致性：C1 引用了不存在的编号、C3 未确认没人接、C2/C4/C5 是 WARN；段落齐不齐归闸门① 管） |
-| `python scripts/check_contract.py --selftest` | 24 个用例 + 2 个 `--no-ignore` 用例 + 1 个行号用例 + 2 个范围说明用例全过 |
-| `python scripts/mutate_checks.py` | 把闸门源码改坏 30 处，每一处都必须让对应的 `--selftest` 变红；基线必须先是绿的。自测空跑过一次（踩坑记录 #29），这一步就是防它再空跑 |
+| `python scripts/check_contract.py --selftest` | 35 个用例 + 2 个 `--no-ignore` 用例 + 1 个行号用例 + 2 个范围说明用例全过 |
+| `python scripts/mutate_checks.py` | 把闸门源码改坏 48 处，每一处都必须让对应的 `--selftest` 变红；基线必须先是绿的。自测空跑过一次（踩坑记录 #29），这一步就是防它再空跑 |
 | `python scripts/check_prompt.py <文件> --no-ignore`、`python scripts/check_contract.py <文件> --no-ignore` | 无视 `<!-- pf-ignore: W码 理由 -->` 豁免注释，把 WARN 全列出来（复核豁免得对不对时用） |
 
 脚本一律：**发现问题就非零退出并打印 `ERROR: ...` 行**，不要静默通过。

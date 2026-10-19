@@ -61,11 +61,18 @@ PLACEHOLDERS = ["TODO", "TBD", "待补充", "待填", "待定", "XXX", "???"]
 PLACEHOLDER_ASCII = ("TODO", "TBD", "XXX", "???")
 PLACEHOLDER_CJK = ("待补充", "待填", "待定")
 #: 文件名 / path token：`docs/TODO.md` 里的 TODO 是文件名，不是没改完的占位符（审计 F11）。
-FILE_TOKEN_RE = re.compile(r"(?<![\w])[\w./\\-]+\.[A-Za-z][A-Za-z0-9]{0,7}")
-
+#: 识别与抹除在 `strip_file_tokens()` 里做：旧版 `FILE_TOKEN_RE.sub` 的 `[\w./\\-]+` 在
+#: 长串标点行（`.`/`-`/`/`、`a/` 重复）上会从每个起点回溯一遍，是 O(n²)：
+#: 32KB 点号 11.6s、1MB 单行直接卡死（审计 R6-gate1-01）。扫描口径与旧正则一致，
+#: 只有「整段词字符 run 一起抹掉」这点变化 —— 对占位符判断等价（run 里切不出两个独立
+#: token），但复杂度是线性的。
+_TOKEN_RUN_RE = re.compile(r"[\w./\\-]+")
+#: 文件名扩展名的形状（`FILE_TOKEN_RE` 里的 `\.[A-Za-z][A-Za-z0-9]{0,7}`）。
+_TOKEN_EXT_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,7}")
 #: HTML 注释块（允许跨行）。`pf-ignore` 只认注释里的那一份：围栏 / 行内代码里的写法示例
-#: 不是真豁免，也不该被当成 E11 报出来（审计 F5 / F12）。
-COMMENT_RE = re.compile(r"<!--(.*?)-->", re.S)
+#: 不是真豁免，也不该被当成 E11 报出来（审计 F5 / F12）。注释区间用 `_comment_spans()`
+#: 线性扫描：旧版 `re.finditer("<!--(.*?)-->")` 在大量未闭合 `<!--` 上是 O(n²)
+#: （64KB 的 `<!--` 要 7.9 秒、1MB 直接卡死，审计 R6-gate1-02）。
 #: 注释内容：`pf-ignore: W2 理由`；理由可以折行，解析时拼成一句。
 IGNORE_RE = re.compile(r"^\s*pf-ignore\s*[:：]\s*(.*)$", re.S)
 IGNORE_CODES = tuple(f"W{i}" for i in range(1, 10))
@@ -149,6 +156,34 @@ def strip_urls(text: str) -> str:
     if "://" not in text and "www." not in text:
         return text
     return URL_RE.sub(" ", text)
+
+
+def strip_file_tokens(text: str) -> str:
+    r"""把文件名 / path token 换成空格（E10 扫占位符前用）。
+
+    等价于旧版 `FILE_TOKEN_RE.sub(" ", text)`（`docs/TODO.md` 整段抹掉，里面的 TODO
+    不算占位符），但按「词字符 run」整体处理：每个 run 只要含 `.扩展名` 形状就抹掉，
+    否则原样保留。旧正则的 `[\w./\\-]+` 会在长串标点行上从每个起点回溯（32KB 点号
+    11.6s、1MB 卡死），这里先 `("." in text)` 与 per-run 扩展名检测，整体 O(n)
+    （审计 R6-gate1-01）。
+    """
+    if "." not in text:
+        return text
+    parts: list[str] = []
+    last = 0
+    for match in _TOKEN_RUN_RE.finditer(text):
+        run = match.group(0)
+        if "." not in run or _TOKEN_EXT_RE.search(run) is None:
+            continue
+        parts.append(text[last:match.start()])
+        parts.append(" " * len(run))
+        last = match.end()
+    if not parts:
+        return text
+    parts.append(text[last:])
+    return "".join(parts)
+
+
 LIB_NAME_RE = re.compile(
     r"(?<![\w./\\-])(?:node|next|nuxt|vue|react|angular|svelte|tailwind|ember|alpine|deno|bun|"
     r"express|nest|three|jquery|webpack|vite|rollup|eslint|prettier|babel|jest|vitest)"
@@ -206,6 +241,26 @@ def strip_emphasis(text: str) -> str:
     return text.replace("**", "").replace("__", "").replace("`", "")
 
 
+def _comment_spans(text: str) -> list[tuple[int, int]]:
+    """HTML 注释的区间列表 `[(start, end), …]`，线性扫描、未闭合的 `<!--` 不算注释。
+
+    旧版用 `re.sub(r"<!--.*?-->")`：每个 `<!--` 起点都会把后面的正文扫一遍找 `-->`，
+    大量未闭合的 `<!--` 因此是 O(n²)（64KB 的 `<!--` 要 7.9 秒、1MB 卡死，审计
+    R6-gate1-02）。这里用两次 `str.find` 顺序推进，单次扫完整段文本。
+    """
+    spans: list[tuple[int, int]] = []
+    at = 0
+    while True:
+        start = text.find("<!--", at)
+        if start < 0:
+            return spans
+        end = text.find("-->", start + 4)
+        if end < 0:
+            return spans
+        spans.append((start, end + 3))
+        at = end + 3
+
+
 def strip_comments(text: str) -> str:
     """把 HTML 注释换成等量空行：注释是给人的元信息，不是正文。
 
@@ -215,7 +270,17 @@ def strip_comments(text: str) -> str:
     加一行 `<!-- pf-ignore: W2 … -->` 之后 W2 既不报也不豁免，直接不见了）。
     换成等量空行是为了保住行号：E9/W9 的报错行号要指向编辑器里那一行。
     """
-    return re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
+    spans = _comment_spans(text)
+    if not spans:
+        return text
+    parts: list[str] = []
+    last = 0
+    for start, end in spans:
+        parts.append(text[last:start])
+        parts.append("\n" * text.count("\n", start, end))
+        last = end
+    parts.append(text[last:])
+    return "".join(parts)
 
 
 def normalize_heading(raw: str) -> str:
@@ -299,6 +364,9 @@ def judge_kind(text: str) -> str | None:
 
 #: 一条 A# 自己的正文里，「子条目 / 表格行」不是这条验收的判定：
 #: `- **A3** …` 下面再挂 `- 参照 A1：判定：命令 …` 不能给 A3 兜底（审计 R5-gate1-04）。
+#: 但子条目**自己以 `判定：` 开头**是常见排版（判定缩进一行写，审计 R6-gate1-04）：
+#: 这种行要先剥掉列表符号再当续行算，否则 E5 假红。表格行 `| 判定 | 人工 |` 不算。
+_JUDGE_LEAD_RE = re.compile(r"^\s*(?:[-*+]\s+|\d{1,2}[.)]\s+)(?:\*\*|__)?判定\s*[:：]")
 NESTED_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s|\d{1,2}[.)]\s|\|)")
 
 
@@ -308,11 +376,17 @@ def judge_text(block: list[str]) -> str:
     `判定：` 必须写在这条 A# 的条目行或它的续行上；写在同块的子条目、表格行或围栏
     示例里都不算 —— 旧版把整块拼起来交给 `JUDGE_RE`，于是 E5 被同块的「判定：命令」
     「传染」成假绿：A3 本体根本没写判定，`--selftest` 里 0 ERROR（审计 R5-gate1-04）。
-    不带列表符号的续行仍然保留，正常排版（换行写判定）不受影响。
+    不带列表符号的续行仍然保留，正常排版（换行写判定）不受影响；子条目自己以
+    `判定：` 开头的（缩进写判定）剥掉列表符号后也算续行（审计 R6-gate1-04）。
     """
+    normalized: list[str] = []
+    for line in block:
+        if NESTED_ITEM_RE.match(line) and _JUDGE_LEAD_RE.match(line):
+            line = NESTED_ITEM_RE.sub("", line, count=1)
+        normalized.append(line)
     fenced = fence_lines(block)
     return "\n".join(
-        line for j, line in enumerate(block)
+        line for j, line in enumerate(normalized)
         if not fenced[j] and (j == 0 or not NESTED_ITEM_RE.match(line))
     )
 
@@ -482,6 +556,28 @@ def read_text(path: Path) -> str:
         else:
             text = data.decode("utf-8", errors="replace")
     return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+#: 零宽 / 不可见字符：从网页、Word、聊天记录里粘进标题和编号时肉眼看不见，却让
+#: 「需求」「R3」「判定：人工」全部匹配失败 —— 闸门假红（审计 R6-gate1-03）。
+#: U+200B 零宽空格、U+200C ZWNJ、U+200D ZWJ、U+2060 word joiner、U+FEFF BOM/零宽不换行空格。
+INVISIBLE_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
+#: 全角字母：中文输入法全角态打出的 `Ｒ3` / `Ａ3` 和半角视觉一样，编号却认不出来（同上）。
+FULLWIDTH_LETTER_TRANS = str.maketrans(
+    "ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ",
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+)
+
+
+def normalize_invisible(text: str) -> str:
+    """去掉零宽/不可见字符，NBSP 换成普通空格，全角字母换成半角字母。
+
+    只动「看不见的东西」与全角字母：正文语义、行数、行号都不变，所以在读文件后一次性做
+    （`check_file` 入口）。不碰全角标点（`，。：`）和全角数字（`\\d` 本来就认）。
+    审计 R6-gate1-03：标题里夹一个 U+200B 就报 E1、`Ｒ3` 认不出就报 E2、判定词夹零宽就
+    报 E5 —— 全是复制粘贴带进来的假红，用户看着那行明明是对的。
+    """
+    return INVISIBLE_RE.sub("", text.replace("\u00a0", " ")).translate(FULLWIDTH_LETTER_TRANS)
 
 
 def split_sections(lines: list[str]) -> tuple[list[tuple[str, int, int, int, bool]], list[str]]:
@@ -671,7 +767,7 @@ def collect_items(lines: list[str], letter: str,
 def check_file(path: Path, use_ignore: bool = True,
                suppressed: list[tuple[Finding, str]] | None = None) -> tuple[list[Finding], int]:
     findings: list[Finding] = []
-    raw = read_text(path)
+    raw = normalize_invisible(read_text(path))
     # 两套行视图，行号一一对应（strip_comments 用等量换行替换注释）：
     #   text_lines —— 原文：E10 占位符要查注释里/围栏里的残留，pf-ignore 注释本身也是注释；
     #   lines      —— 正文：段落、条目、路径、模糊词都只看它，注释里的东西一律不算（审计 F1）。
@@ -968,7 +1064,7 @@ def check_file(path: Path, use_ignore: bool = True,
     for idx, line in enumerate(text_lines, start=1):
         probe = CODE_SPAN_RE.sub("", line)
         probe = strip_urls(probe)
-        probe = FILE_TOKEN_RE.sub(" ", probe)
+        probe = strip_file_tokens(probe)
         token = placeholder_hit(probe)
         if token is not None:
             findings.append(Finding("ERROR", "E10", f"残留占位符 `{token}`", idx))
@@ -1071,23 +1167,27 @@ def parse_ignores(lines: list[str], codes: tuple[str, ...] = IGNORE_CODES,
     `error_codes` 是「本闸门里属于 ERROR、不能豁免的码」：默认就是 `ERROR_CODES`；闸门③ 把
     `C1`/`C3` 也传进来，于是 `pf-ignore: C1` 明确报「是 ERROR」而不是「不认识」（审计 P31/P32）。
 
-    只认**注释块**里的写法：围栏 / 行内代码里的 `pf-ignore` 是写法示例，既不豁免任何东西，
-    也不该逼出一条假 E11（审计 F5）。注释块允许跨行，理由按空白拼成一句（审计 F12）。
+    只认**注释块**里的写法：围栏 / 缩进代码块 / 行内代码里的 `pf-ignore` 是写法示例，
+    既不豁免任何东西，也不该逼出一条假 E11（审计 F5 / R6-gate1-05）。注释块允许跨行，
+    理由按空白拼成一句（审计 F12）；注释区间用 `_comment_spans()` 线性扫描（R6-gate1-02）。
     """
     ignores: list[tuple[int, str, str]] = []
     problems: list[Finding] = []
     text = "\n".join(lines)
     if fenced is None:
         fenced = fence_lines(lines)
-    for m in COMMENT_RE.finditer(text):
-        body = m.group(1)
+    indented = indented_code_lines(lines, fenced)
+    for c_start, c_end in _comment_spans(text):
+        body = text[c_start + 4:c_end - 3]
         if "pf-ignore" not in body:
             continue
-        idx = text.count("\n", 0, m.start())
+        idx = text.count("\n", 0, c_start)
         if idx < len(fenced) and fenced[idx]:
             continue  # 围栏里的示例不是真豁免
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        if lines[idx][: m.start() - line_start].count("`") % 2 == 1:
+        if idx < len(indented) and indented[idx]:
+            continue  # 缩进代码块里的示例不是真豁免
+        line_start = text.rfind("\n", 0, c_start) + 1
+        if lines[idx][: c_start - line_start].count("`") % 2 == 1:
             continue  # 行内代码里的示例不是真豁免
         hit = IGNORE_RE.match(body.strip())
         if not hit:
@@ -1712,6 +1812,51 @@ def selftest() -> int:
                      "- **R2** 输出控制在两行以内，空行最多跳过 3 行。\n"
                      "- **R2** 也支持 data/old.xlsx 的回填。"),
          {"E2b"}),
+        # ---- R6-gate1 回归：不可见字符 / 全角字母造成的假红 ---------------------
+        # 从网页、Word、聊天记录里粘进标题的零宽字符肉眼看不见，却让别名、编号、判定词
+        # 全部匹配失败：用户看着那行明明是对的，闸门却报 E1/E2/E3/E4/E5（审计 R6-gate1-03）。
+        ("零宽空格不破坏段落标题识别",
+         lambda: sub(from_clean(), "## 4. 需求（R#）", "## 4. 需\u200b求（R#）"),
+         set()),
+        ("行首零宽字符 / BOM 不破坏段落标题识别",
+         lambda: sub(from_clean(), "## 12. 汇报格式", "\u200b\ufeff## 12. 汇报格式"),
+         set()),
+        ("零宽空格不破坏 R# 编号识别",
+         lambda: sub(from_clean(), "- **R3**", "- **R\u200b3**"),
+         set()),
+        ("零宽空格不破坏验收引用",
+         lambda: sub(from_clean(), "A3（对应 R3）", "A3（对应 R\u200b3）"),
+         set()),
+        ("全角字母的 R# 编号不误报 E2",
+         lambda: sub(from_clean(), "- **R3**", "- **Ｒ3**"),
+         set()),
+        ("全角字母的 A# 编号不误报 E3",
+         lambda: sub(from_clean(), "A3（对应 R3）", "Ａ3（对应 R3）"),
+         set()),
+        ("NBSP 不破坏段落标题识别",
+         lambda: sub(from_clean(), "## 4. 需求（R#）", "## 4. 需\u00a0求（R#）"),
+         set()),
+        ("零宽字符不破坏判定取值",
+         lambda: sub(from_clean(), "判定：人工 看 main 分支。", "判定：人\u200b工 看 main 分支。"),
+         set()),
+        # ---- R6-gate1 回归：判定缩进写在子条目里也算这条 A# 的判定 ------------
+        # 常见排版：`- **A3** …` 下一行缩进写 `- 判定：人工`。旧版把子条目一律当「别人的
+        # 判定」排除，于是照报 E5（审计 R6-gate1-04 的假红侧）。
+        ("判定写法：缩进子条目里单独一行写判定",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。\n  - 判定：人工 看 main 分支。"),
+         set()),
+        ("判定写法：缩进子条目里加粗写判定",
+         lambda: sub(from_clean(), a3_line,
+                     "- **A3（对应 R3）** 入口与退出码符合要求。\n  - **判定：** 人工 看 main 分支。"),
+         set()),
+        # ---- R6-gate1 回归：缩进代码块里的 pf-ignore 是示例，不是真豁免 ---------
+        # 与围栏里的示例同口径（校验清单「豁免注释」）：示例不能关掉正文里真该报的 W2。
+        # 旧版只跳过围栏与行内代码，4 空格缩进代码块里的写法照样被当成真豁免（审计 R6-gate1-05）。
+        ("缩进代码块里的豁免注释不生效",
+         lambda: sub(with_plain_r3(), plain_r3_new,
+                     plain_r3_new + "\n\n    <!-- pf-ignore: W2 这版先不量化 -->"),
+         set(), {"W2"}, "", set()),
     ]
     for case in inline:
         name, build, want = case[0], case[1], case[2]
@@ -1894,6 +2039,18 @@ def selftest() -> int:
          from_clean() + "".join(
              f"\n第 {i} 行附注：把借阅登记的输出控制在两行以内。" for i in range(1, 20001)),
          set(), 10.0),
+        # R6-gate1-01：E10 的 `FILE_TOKEN_RE.sub` 在「长串标点」行上逐起点回溯，是 O(n²)：
+        # 32768 个点号 11.6s、1MB 单行卡死。修复改成按「词字符 run」线性扫描后 <0.1s。
+        ("标点长行（65536 个点号）",
+         sub(from_clean(), "每周五花 15 分钟手工抄一遍。[AI 推断]",
+             "每周五花 15 分钟手工抄一遍。[AI 推断]\n" + "." * 65536),
+         set(), 3.0),
+        # R6-gate1-02：`strip_comments` 的 `<!--.*?-->` 在大量未闭合 `<!--` 上同样是 O(n²)：
+        # 65536 字符要 7.9s、1MB 卡死。修复改成 `str.find` 线性推进后 <0.1s。
+        ("大量未闭合 HTML 注释（65536 字符）",
+         sub(from_clean(), "每周五花 15 分钟手工抄一遍。[AI 推断]",
+             "每周五花 15 分钟手工抄一遍。[AI 推断]\n" + "<!--" * 16384),
+         set(), 3.0),
     ]
     for perf_name, perf_text, want_perf, limit in perf_cases:
         got_perf, elapsed = _run_timed(perf_text)

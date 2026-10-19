@@ -139,8 +139,10 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         "三态接受词退回裸 go/接（（Go 语言与不接（kill）都算接住）", "check_skill.py",
         '        if claims_triage and not (has_marker(prose, TRIAGE_STATE_MARKERS)\n'
+        '                                  and has_marker(prose, TRIAGE_MID_MARKERS)\n'
         '                                  and has_marker(prose, TRIAGE_ACCEPT_MARKERS)):',
         '        if claims_triage and not (has_marker(prose, TRIAGE_STATE_MARKERS)\n'
+        '                                  and has_marker(prose, TRIAGE_MID_MARKERS)\n'
         '                                  and has_marker(prose, ["接（", "go", "needs-clarification"])):',
     ),
     Mutation(
@@ -170,7 +172,7 @@ MUTATIONS: list[Mutation] = [
         "                k = j + 1\n"
         "                while k < len(lines) and not lines[k].strip():\n"
         "                    k += 1\n"
-        "                if (k < len(lines) and lines[k][:1] in (\" \", \"\\t\")\n"
+        "                if (k < len(lines) and lines[k][:1] == \" \"\n"
         "                        and not FRONTMATTER_KEY_RE.match(lines[k])):\n"
         "                    parts.append(\"\")\n"
         "                    j = k\n"
@@ -238,8 +240,102 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "C5 命令名后面跟什么不管了（技术栈名字算命令）", "check_contract.py",
-        '    r"(?=\\s+(?!\\d)[A-Za-z0-9_./\\\\~-])",',
+        '    r"(?=\\s+(?!(?:" + _COMMAND_STOPWORDS + r")\\b)(?!\\d)[A-Za-z0-9_./\\\\~-])",',
         '    r"\\b",',
+    ),
+    # ---- 第 6 轮审计新增：每个修复分支都要能被"改回去"抓住 ----
+    Mutation(
+        "C5 命令表退回旧词表（yarn / pip / docker 又算没给命令）", "check_contract.py",
+        '    "python[0-9.]*|py[0-9.]*|node|npm|pnpm|npx|yarn|bun|deno|git|bash|zsh|sh|pwsh|powershell|"',
+        '    "python[0-9.]*|py[0-9.]*|node|npm|pnpm|npx|bun|deno|git|bash|zsh|sh|pwsh|powershell|"',
+    ),
+    Mutation(
+        "C5 命令名后面不挡英文虚词了（make sure / go to 又算命令）", "check_contract.py",
+        '    r"(?=\\s+(?!(?:" + _COMMAND_STOPWORDS + r")\\b)(?!\\d)[A-Za-z0-9_./\\\\~-])",',
+        '    r"(?=\\s+(?!\\d)[A-Za-z0-9_./\\\\~-])",',
+    ),
+    Mutation(
+        "C3 反向否定句退回旧词表（不适用 / N/A / 0 条 又算待办）", "check_contract.py",
+        '    r"(?:无|没有|暂无|空|不存在|不适用|不涉及|n/?a|none|零|0)\\s*(?:条|项|个|处)?"',
+        '    r"(?:无|没有|暂无|空|不存在)\\s*(?:条|项|个|处)?"',
+    ),
+    Mutation(
+        "「待确认：…」不再归一成「未确认」（换个同义词就假绿）", "check_contract.py",
+        '    text = _PENDING_ALIAS_RE.sub("未确认", text)',
+        "    text = text",
+    ),
+    Mutation(
+        "纸张规格豁免又对 R# 生效（R9 出图被吞掉）", "check_contract.py",
+        '                if letter == "A" and _PAPER_SPEC_TAIL_RE.match(clean[match.end():]):',
+        '                if _PAPER_SPEC_TAIL_RE.match(clean[match.end():]):',
+    ),
+    Mutation(
+        "frontmatter 的 tab 缩进不再报 E1（宿主会忽略技能却放行）", "check_skill.py",
+        '        if raw[:1] == "\\t":\n            return fields, i + 1, "badtab", key_lines',
+        '        if False:\n            return fields, i + 1, "badtab", key_lines',
+    ),
+    Mutation(
+        "YAML 别名 *d 不再解析（合法 description 变 E5+E6+W2）", "check_skill.py",
+        "            fields[key] = anchors.get(alias, value.strip())",
+        "            fields[key] = value.strip()",
+    ),
+    Mutation(
+        "分诊只查两态（漏「先问一句」不报 W3）", "check_skill.py",
+        "                                  and has_marker(prose, TRIAGE_MID_MARKERS)",
+        "                                  and True",
+    ),
+    Mutation(
+        "正文缩进代码块不再剥（样例里的 AGENTS.md 变假 E7）", "check_skill.py",
+        "    prose = _strip_indented_code(strip_fences(body))",
+        "    prose = strip_fences(body)",
+    ),
+    Mutation(
+        "同目录前缀只剥 ./ 不剥 .\\（Windows 写法漏报 E7）", "check_skill.py",
+        '    return re.sub(r"(?<!\\.)\\.[/\\\\]", "", prose)',
+        '    return re.sub(r"(?<!\\.)\\./", "", prose)',
+    ),
+    Mutation(
+        "反引号里的 <占位符> 不再算命令（骨架模板假 WARN）", "check_contract.py",
+        '    if re.fullmatch(r"<[^<>]*>", body):\n        return True',
+        "    if False:\n        return True",
+    ),
+    Mutation(
+        "反引号里 ./ 开头的路径不再算命令（./gradlew 假 WARN）", "check_contract.py",
+        "        COMMAND_HINT_RE.search(body) or SCRIPT_RE.search(body) or _COMMANDISH_PATH_RE.match(body)",
+        "        COMMAND_HINT_RE.search(body) or SCRIPT_RE.search(body)",
+    ),
+    Mutation(
+        "反引号里只写命令名不再算命令（`pytest` 假 WARN）", "check_contract.py",
+        '    if _BARE_COMMAND_RE.fullmatch(body):\n        return True',
+        "    if False:\n        return True",
+    ),
+    # ---- 合入 r5-pf-gate1 的 5 条变异（第 6 轮，gate1 修复分支的回归保护）----
+    Mutation(
+        "E10 文件名抹除被删（TODO.md 变占位符）", "check_prompt.py",
+        "        probe = strip_file_tokens(probe)",
+        "        probe = probe",
+    ),
+    Mutation(
+        "注释扫描退回二次回溯的 finditer", "check_prompt.py",
+        "    spans = _comment_spans(text)",
+        '    spans = [(m.start(), m.end()) for m in re.finditer(r"<!--.*?-->", text, re.S)]',
+    ),
+    Mutation(
+        "不可见字符归一化被删（零宽/变体选择符又漏过）", "check_prompt.py",
+        "    raw = normalize_invisible(read_text(path))",
+        "    raw = read_text(path)",
+    ),
+    Mutation(
+        "judge_text 不再认缩进子条目里的判定", "check_prompt.py",
+        "        if NESTED_ITEM_RE.match(line) and _JUDGE_LEAD_RE.match(line):",
+        "        if False:",
+    ),
+    Mutation(
+        "缩进代码块里的 pf-ignore 又变真豁免", "check_prompt.py",
+        "        if idx < len(indented) and indented[idx]:\n"
+        "            continue  # 缩进代码块里的示例不是真豁免",
+        "        if False:\n"
+        "            continue  # 缩进代码块里的示例不是真豁免",
     ),
 ]
 

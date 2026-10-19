@@ -136,6 +136,12 @@ TRIAGE_ACCEPT_MARKERS = [
     "needs-clarification",
 ]
 
+#: 「先问一句（needs-clarification）」这一态。W3 的报错文案要求三态齐，旧版只查了接/不接两态，
+#: 正文声称分诊却漏掉中间态的假绿就漏过去了（第 6 轮审计 R6-PF-G2-03）。
+TRIAGE_MID_MARKERS = [
+    "先问一句", "先问清楚", "需要澄清", "需澄清", "问清楚", "clarify", "clarification",
+]
+
 #: 薄包装正文第一步必须指向同目录的规范本体，并写清"先把它读完"。
 #: SPEC_FILE_MARKERS（哪些文件算规范本体）在下面的 SIBLING_PATTERNS 旁边定义，两处共用一份。
 SPEC_READ_MARKERS = ["读一遍", "从头到尾", "先读", "先把它", "读文件工具"]
@@ -328,21 +334,27 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], int, str, dict[str, in
     """解析最简 YAML frontmatter。
 
     返回 `(字段表, 闭合行号, 状态, 每个字段所在行号)`；状态是 `"ok"`（有 frontmatter 且闭合）/
-    `"missing"`（开头没有 `---`）/ `"unclosed"`（找不到第二个 `---`，宿主会整个忽略这个技能）。
+    `"missing"`（开头没有 `---`）/ `"unclosed"`（找不到第二个 `---`，宿主会整个忽略这个技能）/
+    `"badtab"`（用 tab 做缩进，真 YAML 解析器会报错，宿主同样会整个忽略这个技能）。
 
     只认 `key: value`，另外照顾三种真实写法：
     - `|` / `>` 块标量（description 常这么写）；
     - 值写在下方的**缩进续行**里，或折行续写（YAML 纯标量折行，按空格折叠；空行是段落分隔）；
-    - 行内注释。
+    - 行内注释、锚点 / 别名（`&d` / `*d`）。
     """
     lines = split_lines(text)
     if not lines or lines[0].strip() != "---":
         return {}, 0, "missing", {}
     fields: dict[str, str] = {}
     key_lines: dict[str, int] = {}
+    anchors: dict[str, str] = {}
     i = 1
     while i < len(lines):
         raw = lines[i]
+        # YAML 不允许用 tab 做缩进：宿主（PyYAML）会直接报 ScannerError 并整个忽略技能，
+        # 旧版把它当合法续行 → 闸门 0 findings（第 6 轮审计 R6-PF-G2-01）。
+        if raw[:1] == "\t":
+            return fields, i + 1, "badtab", key_lines
         if raw.strip() == "---":
             return fields, i + 1, "ok", key_lines   # i + 1：1-based，指向闭合的那一行
         m = FRONTMATTER_KEY_RE.match(raw)
@@ -352,13 +364,28 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], int, str, dict[str, in
         key = m.group(1)
         value = strip_inline_comment(m.group(2))
         key_lines[key] = i + 1
+        # YAML 锚点 / 别名：`x-desc: &d …` 写在前面，`description: *d` 引用它。
+        # 旧版把 `*d` 当字面量，合法写法被报 E5+E6+W2（第 6 轮审计 R6-PF-G2-02）。
+        anchor = None
+        anchor_match = re.match(r"&([A-Za-z0-9_-]+)\s*(.*)$", value)
+        if anchor_match:
+            anchor = anchor_match.group(1)
+            value = anchor_match.group(2)
+        if value.strip().startswith("*"):
+            alias = value.strip()[1:].strip()
+            fields[key] = anchors.get(alias, value.strip())
+            i += 1
+            continue
         if value.strip() in ("|", ">", "|-", ">-", "|+", ">+"):
             block: list[str] = []
             j = i + 1
-            while j < len(lines) and (lines[j].strip() == "" or lines[j][:1] in (" ", "\t")):
+            # 只认空格缩进：tab 开头的行留给外层循环报 badtab（第 6 轮审计 R6-PF-G2-01）。
+            while j < len(lines) and (lines[j].strip() == "" or lines[j][:1] == " "):
                 block.append(lines[j].strip())
                 j += 1
             fields[key] = "\n".join(part for part in block if part)
+            if anchor:
+                anchors[anchor] = fields[key]
             i = j
             continue
         parts = [value.strip()]
@@ -371,13 +398,13 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], int, str, dict[str, in
                 k = j + 1
                 while k < len(lines) and not lines[k].strip():
                     k += 1
-                if (k < len(lines) and lines[k][:1] in (" ", "\t")
+                if (k < len(lines) and lines[k][:1] == " "
                         and not FRONTMATTER_KEY_RE.match(lines[k])):
                     parts.append("")
                     j = k
                     continue
                 break
-            if nxt[:1] not in (" ", "\t"):
+            if nxt[:1] != " ":
                 break
             if nxt.lstrip().startswith("#"):
                 j += 1
@@ -385,6 +412,8 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], int, str, dict[str, in
             parts.append(strip_inline_comment(nxt).strip())
             j += 1
         fields[key] = unquote(_fold_plain_parts(parts))
+        if anchor:
+            anchors[anchor] = fields[key]
         i = j
     return fields, 0, "unclosed", key_lines
 
@@ -420,13 +449,40 @@ def strip_fences(text: str) -> str:
     return "\n".join(kept)
 
 
+_INDENT_CODE_RE = re.compile(r"^(?: {4}|\t)")
+
+
+def _strip_indented_code(text: str) -> str:
+    """去掉缩进代码块（CommonMark：空行后、4 空格/Tab 起头，直到非空且不缩进行）。
+
+    正文里的代码样例是「别人的文字」：样例里出现的 `AGENTS.md` 不是这个技能的声明。
+    围栏代码块已经由 `strip_fences` 剥掉，缩进代码块之前没剥 → 样例里的 `AGENTS.md`
+    被当成同目录依赖误报 E7（第 6 轮审计 R6-PF-G2-04）。口径与 check_prompt.py 的
+    `indented_code_lines()` 一致：只有「上一行是空行（或文件开头）」的缩进行才是代码块。
+    """
+    lines = split_lines(text)
+    kept: list[str] = []
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if line.strip() and _INDENT_CODE_RE.match(line) and (idx == 0 or not lines[idx - 1].strip()):
+            idx += 1
+            while idx < len(lines) and (not lines[idx].strip() or _INDENT_CODE_RE.match(lines[idx])):
+                idx += 1
+            continue
+        kept.append(line)
+        idx += 1
+    return "\n".join(kept)
+
+
 def _sibling_prose(prose: str) -> str:
-    """归一化同目录前缀 `./` 再匹配依赖：`./AGENTS.md` 与 `AGENTS.md` 是同一个同目录文件。
+    """归一化同目录前缀 `./` / `.\\` 再匹配依赖：`./AGENTS.md` 与 `AGENTS.md` 是同一个同目录文件。
 
     `../` 与绝对路径仍不算同目录（前面的字符是 `/`、`\\`、`:`，会被 SIBLING_PATTERNS 的环视挡住）。
-    旧版漏认 `./AGENTS.md`，只拷贝 SKILL.md 时依赖明明缺了却不报 E7（第 5 轮审计 R5-PF-G3-08）。
+    旧版漏认 `./AGENTS.md`，只拷贝 SKILL.md 时依赖明明缺了却不报 E7（第 5 轮审计 R5-PF-G3-08）；
+    第 6 轮审计 R6-PF-G2-05：Windows 同目录写法 `.\\AGENTS.md` 同样要认。
     """
-    return re.sub(r"(?<!\.)\./", "", prose)
+    return re.sub(r"(?<!\.)\.[/\\]", "", prose)
 
 
 def check_skill(path: Path) -> tuple[list[Finding], int]:
@@ -456,6 +512,14 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
         findings.append(Finding("ERROR", "E1",
                                 "frontmatter 没闭合：找不到第二个 `---`；这种文件会被宿主整个忽略"
                                 "（连正文都不读），补上收尾的 `---` 再说", 1))
+        return findings, len(text)
+    if fm_state == "badtab":
+        # 真 YAML 解析器（宿主用的就是它）遇到 tab 缩进直接 ScannerError，技能会被整个忽略；
+        # 旧版把 tab 当合法续行 → 闸门 0 findings（第 6 轮审计 R6-PF-G2-01）。
+        findings.append(Finding("ERROR", "E1",
+                                "frontmatter 里有 tab 缩进：YAML 不允许用 tab 做缩进，宿主会整个忽略"
+                                "这个技能；续行 / 块标量请用空格缩进",
+                                fm_end or 1))
         return findings, len(text)
 
     name = fields.get("name", "")
@@ -514,8 +578,8 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
     # ---- 正文
     body_lines = lines[fm_end:] if fm_end else []
     body = "\n".join(body_lines)
-    # 声明类的检查只看正文本身，不看正文里引用的样例代码块。
-    prose = strip_fences(body)
+    # 声明类的检查只看正文本身，不看正文里引用的样例代码块（围栏 + 缩进两类都剥）。
+    prose = _strip_indented_code(strip_fences(body))
     body_start = fm_end + 1  # 1-based 行号，正文第一行（fm_end 已经是闭合 `---` 的行号）
 
     if prose.strip():
@@ -529,6 +593,7 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
         # 分诊三态：只在正文声称了自己会判断"该不该接"时才要求写全（自足技能可以没有分诊）。
         claims_triage = has_marker(prose, TRIAGE_CLAIM_MARKERS)
         if claims_triage and not (has_marker(prose, TRIAGE_STATE_MARKERS)
+                                  and has_marker(prose, TRIAGE_MID_MARKERS)
                                   and has_marker(prose, TRIAGE_ACCEPT_MARKERS)):
             findings.append(Finding("WARN", "W3",
                                     "正文写了分诊，却没有写全三态（接 go / 先问一句 needs-clarification / 不接 kill）；"
@@ -697,6 +762,23 @@ def selftest() -> int:
          lambda: sub(SELFTEST_FIXTURE, "`AGENTS.md`", "`./AGENTS.md`"), {"E7"}),
         # 薄包装只拷一个 SKILL.md：AGENTS.md / references/ / scripts/ 都不在
         ("只拷 SKILL.md（缺同目录文件）", lambda: SELFTEST_FIXTURE, {"E7"}),
+        # ---- 第 6 轮审计撞出来的 YAML 假绿/假红与路径漏认 ----
+        # frontmatter 用 tab 缩进：真 YAML 解析器直接报错，宿主会整个忽略技能（第 6 轮 R6-PF-G2-01）
+        ("frontmatter 用 tab 缩进（YAML 非法）",
+         lambda: sub(SELFTEST_FIXTURE, desc_line,
+                     "description: 当用户需要演示时，使用本技能给出步骤，不接：纯聊天。\n"
+                     "\t触发信号补充：需求只有一句话。"),
+         {"E1"}),
+        # YAML 锚点/别名：`description: *d` 是合法 YAML，旧版当字面量 → 假 E5+E6+W2（第 6 轮 R6-PF-G2-02）
+        ("description 用 YAML 锚点/别名引用",
+         lambda: sub(SELFTEST_FIXTURE, desc_line,
+                     "x-desc: &d 当用户给出模糊需求时，使用本技能把它写成可执行的长提示词。不接：单步任务。\n"
+                     "description: *d"),
+         set()),
+        # Windows 同目录写法 `.\AGENTS.md` 也是同目录依赖（第 6 轮 R6-PF-G2-05）
+        ("只拷 SKILL.md 且依赖写成 .\\AGENTS.md",
+         lambda: sub(SELFTEST_FIXTURE, "`AGENTS.md`", "`.\\AGENTS.md`"),
+         {"E7"}),
     ]
 
     # 这两个用例本来就靠"不改夹具"来表达意图：正例是基准件，E7 是"文件没少、只是没拷过来"
@@ -761,6 +843,56 @@ def selftest() -> int:
         got = {f.code for f in findings if f.level == "ERROR"}
         ok = not got
         print(f"{'PASS' if ok else 'FAIL'}  [闸门] 嵌套围栏里的样例不算同目录依赖: "
+              f"ERROR 码 {sorted(got)}（期望 []）")
+        if not ok:
+            failed += 1
+            for f in findings:
+                if f.level == "ERROR":
+                    print(f"      {f.render()}")
+
+    # 2.6) 分诊三态：正文声称分诊却只写接/不接两态（漏「先问一句 / needs-clarification」）要报 W3；
+    #      三态齐全不报。旧版只查两态，两态正文假绿（第 6 轮审计 R6-PF-G2-03）。
+    two_state = SELFTEST_FIXTURE.replace("## 分诊：接 / 先问一句 / 不接", "## 分诊：接 / 不接")
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_dir = Path(tmp) / "prompt-forge"
+        skill_dir.mkdir()
+        path = skill_dir / "SKILL.md"
+        write_text_lf(skill_dir / "AGENTS.md", "# 规范\n")
+        (skill_dir / "references").mkdir()
+        (skill_dir / "scripts").mkdir()
+        (skill_dir / "scripts" / "check_prompt.py").write_text("", encoding="utf-8")
+        for text, want_w3 in ((two_state, True), (SELFTEST_FIXTURE, False)):
+            write_text_lf(path, text)
+            findings, _ = check_skill(path)
+            got_w3 = [f for f in findings if f.code == "W3"]
+            ok = bool(got_w3) == want_w3
+            print(f"{'PASS' if ok else 'FAIL'}  [闸门] 分诊{'两态' if want_w3 else '三态'}要"
+                  f"{'报' if want_w3 else '不报'} W3: {'有' if got_w3 else '无'}（期望 "
+                  f"{'有' if want_w3 else '无'}）")
+            if not ok:
+                failed += 1
+                for f in findings:
+                    print(f"      {f.render()}")
+
+    # 2.7) 缩进代码块里的样例也是别人的文字：样例里写 references/ 不能算本技能的依赖
+    #      （旧版只剥围栏 → 假 E7，第 6 轮审计 R6-PF-G2-04）。
+    indented_sample = SELFTEST_FIXTURE.replace(
+        "扩充菜单的每一项都自带默认档；用户说「都可以 / 你决定」就照默认走。",
+        "下面是别的技能的样例（不是本技能的依赖）：\n\n"
+        "    开始之前先读同目录的 references/ 目录。\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        skill_dir = Path(tmp) / "prompt-forge"
+        skill_dir.mkdir()
+        path = skill_dir / "SKILL.md"
+        write_text_lf(path, indented_sample)
+        # 正文真正依赖的 AGENTS.md / scripts 补上，故意不建 references：
+        write_text_lf(skill_dir / "AGENTS.md", "# 规范\n")
+        (skill_dir / "scripts").mkdir()
+        (skill_dir / "scripts" / "check_prompt.py").write_text("", encoding="utf-8")
+        findings, _ = check_skill(path)
+        got = {f.code for f in findings if f.level == "ERROR"}
+        ok = not got
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] 缩进代码块里的样例不算同目录依赖: "
               f"ERROR 码 {sorted(got)}（期望 []）")
         if not ok:
             failed += 1
