@@ -3,13 +3,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![闸门](https://github.com/hwy-miaomiao/prompt-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/hwy-miaomiao/prompt-forge/actions/workflows/ci.yml)
 
+**简体中文** | [English](README.en.md)
+
 **把「帮我做个 X」变成「AI 拿到就能直接开工的长提示词」。**
 
 大多数人用 AI 的方式是：一句话丢过去 → AI 猜 → 出来的东西不对 → 再吵三轮。
 问题不在 AI 的能力，在于**需求从没被说清楚过**：没有交付物路径、没有验收口径、没有边界、
 没有"什么算做完"。prompt-forge 把"说清楚"这件事做成了一套可执行的流程：
 
-> 任意一句需求 → **自动分诊**（该接就接，不该接就一句话说清理由）→ 一轮带推荐项与参考选项的问询（优先 ≤5 题，最多 9 题）→ 一份「写多厚」的扩充菜单（每项自带默认档）→ 12 段结构的长提示词 → 三道机器闸门 0 ERROR → 交付。
+> 任意一句需求 → **自动分诊**（该接就接，不该接就一句话说清理由）→ 一轮带推荐项与参考选项的问询（优先 ≤5 题，最多 9 题）→ 一份「写多厚」的扩充菜单（每项自带默认档）→ 12 段结构的长提示词 → 闸门①、③ 0 ERROR → 交付。
 
 **不用背触发词。** 它不靠「帮我做个 X」这类固定句式触发：宿主把技能的 `name` + `description`
 交给模型，模型按语义判断这次输入该不该用它。所以描述里同时写清了"什么时候该用"和"什么时候不该用" ——
@@ -89,6 +91,7 @@ cd prompt-forge
 python scripts/check_prompt.py --selftest
 # PASS  例1-下载文件夹整理.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  例2-班级报名网站.prompt.md: 0 ERROR（期望 0 ERROR）
+# PASS  例3-logsift-json-export.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  反例-模糊需求.prompt.md: 16 ERROR（期望 >=5 ERROR）
 # PASS  templates/提示词骨架.md: 0 ERROR, 0 WARN（期望 0 ERROR 0 WARN）
 # …… 共 103 个用例 = 这 5 个真实文件 + 98 个内置回归（标题绑定与抢绑、模糊词豁免、
@@ -102,9 +105,10 @@ python scripts/check_prompt.py --selftest
 # 闸门②：检查本技能自己的定义（description 能不能被自动识别、name 会不会让技能静默失效）
 python scripts/check_skill.py --selftest
 # PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
-# PASS  [示例] good-minimal: ERROR [] WARN []（期望 ERROR [] WARN []）
-# …… 共 56 个用例（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑）
-#      = 真实 SKILL.md + 9 个真实示例 + 44 个内置闸门用例（含行号、BOM、长句触发、
+# PASS  [闸门] 正例夹具: ERROR 码 []（期望 []）
+# …… 共 56 个用例（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑；
+#      两者都建不了的环境会 SKIP，不算失败）
+#      = 真实 SKILL.md + 9 个真实示例 + 46 个内置闸门用例（含行号、BOM、长句触发、
 #      `go` 不被 `good` / `Go 语言` 命中、「不接（kill）」不算写了「接」等）
 
 # 闸门③：检查段与段之间对不对得上（需求↔步骤、未确认↔停下条件、判定↔命令）
@@ -112,7 +116,7 @@ python scripts/check_contract.py --selftest
 # PASS  [闸门③] 基准件：闸门① 的自测夹具跨段也对得上: ERROR 码 []（期望 []） WARN 码 []（期望 []）
 # PASS  [闸门③] C1 引用了不存在的需求号: ERROR 码 ['C1']（期望 ['C1']） WARN 码 []（期望 []）
 # …… 共 35 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例
-#      （C1/C3 是 ERROR，C2/C4/C5 是 WARN；最后两条是「没东西可查时要出范围说明」）
+#      （C1/C3 是 ERROR，C2/C4/C5 是 WARN；最后两条是「范围说明」用例：没东西可查 / 有需求但缺第 9 段、C2 无从检查）
 
 # 变异检验：把闸门源码改坏 48 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
 python scripts/mutate_checks.py
@@ -155,13 +159,15 @@ Q3. 交付形态（影响：交付物段落 + 验收段落）
 
 ## 机器闸门
 
-三道，都要 0 ERROR；另有一个变异检验，专门证明这三道自测不是空跑。
+交付 `prompt.md` 要求闸门①、③ 都 0 ERROR；闸门② 在改了 `SKILL.md` / `AGENTS.md` / `references/` 之后单独跑；另有一个变异检验，专门证明这三道自测不是空跑。
 
 **闸门①：长提示词本身**
 
 ```bash
-python scripts/check_prompt.py 输出/<slug>/prompt.md
+python scripts/check_prompt.py <输出目录>/prompt.md
 ```
+
+其中 `<输出目录>`：克隆用法是 `输出/<slug>/`，安装成 Skill 的用法是 `提示词/<slug>/`（见上文「快速开始」）。
 
 拦住这些结构问题：缺段落、需求/验收条数不足、编号重复、验收没引用需求、验收没有判定方式、
 需求没被验收覆盖、非目标写成"无"、交付物没路径、需求段出现模糊词、残留占位符。
@@ -182,15 +188,16 @@ python scripts/check_prompt.py 输出/<slug>/prompt.md
 
 ```bash
 python scripts/check_skill.py SKILL.md
-python scripts/check_skill.py --selftest   # 56 个用例（2 个链接安装用例：Linux 符号链接 / Windows junction 真跑）
+python scripts/check_skill.py --selftest   # 56 个用例（2 个链接安装用例：Linux 符号链接 / Windows junction 真跑；两者都建不了的环境会 SKIP）
 ```
 
 查的是「自动识别」这件事能不能成立：
 
 - `name` 是不是 kebab-case、**是否与所在目录名一致**（目录包形态就是 `<name>/SKILL.md`）；
 - `description` 有没有超过规范上限（1024 字符），前 500 字里有没有写清**什么时候该用**与**什么时候不该用**
-  （有的宿主只渲染前 500 字。`whenToUse` 不是可以偷懒的地方：宿主会解析它，但 DSH 的目录条目
-  只把 `name` + 截断后的 `description` 交给模型，路由只吃这两样）；
+  （有的宿主只渲染前 500 字。`whenToUse` 帮不上路由：DSH 的目录条目只把 `name` + 截断后的
+  `description` 交给模型，`whenToUse` 根本不渲染 —— 见 `references/方法论出处.md` 第 4.5 节、
+  `references/踩坑记录.md` 第 21 条）；
 - 正文**声称了**分诊三态 / **引用了同目录的 `AGENTS.md`** / **给了**菜单时，对应的三态、
   「动手前先读完」、"每项自带默认档"有没有写清 —— 不声称就不查：一份与 prompt-forge 无关的自足技能不该被我们的家规拦下；
   但「描述里要写清何时该用 / 何时不该用」对**任何**技能都查（这是官方判据，不是家规）；
@@ -204,7 +211,7 @@ python scripts/check_skill.py --selftest   # 56 个用例（2 个链接安装用
 **闸门③：段与段之间对不对得上**
 
 ```bash
-python scripts/check_contract.py 输出/<slug>/prompt.md
+python scripts/check_contract.py <输出目录>/prompt.md
 python scripts/check_contract.py --selftest   # 35 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例
 ```
 
@@ -229,7 +236,7 @@ python scripts/check_contract.py --selftest   # 35 个用例 + 2 个 --no-ignore
 （三份 `--selftest` + `mutate_checks.py`），另外还检查三件仓库级的事：
 本仓库自己的资产（三个正例、提示词骨架、`SKILL.md`）必须过闸门、反例必须被拦下、仓库文本必须是 LF。
 
-**0 ERROR 才允许交付**；WARN 要逐条说明为什么不影响执行。
+**闸门①、③ 0 ERROR 才允许交付**；WARN 要逐条说明为什么不影响执行。
 机器只管结构，需求对不对仍然要靠问询与人工复核 —— 闸门是拦低级错误的，不是质量保证。
 
 ## 目录结构
@@ -240,6 +247,7 @@ prompt-forge/
 ├── SKILL.md             # 装成 Agent Skill 时的入口
 ├── CLAUDE.md            # 让 Claude Code 也读 AGENTS.md
 ├── README.md
+├── README.en.md         # 英文说明（与 README.md 互链）
 ├── .github/workflows/   # CI：三份自测 + 变异检验 + 三件仓库级检查（资产过闸门 / 反例被拦下 / 全 LF）
 ├── references/          # 需求问询 · 参考样例库 · 提示词结构 · 模糊词换算表 · 校验清单 · 踩坑记录 · 方法论出处
 ├── templates/           # 提示词骨架 · 需求确认模板
@@ -301,12 +309,14 @@ prompt-forge 的价值在于**流程约束**：先分诊、再问、给参考、
 欢迎提 Issue 与 PR：新的参考样例、新的需求形态题库、新的闸门检查项，或者一条你自己踩过的坑
 （`references/踩坑记录.md` 的格式是「症状 → 原因 → 正确做法」，照这个写就行）。
 
-改动 `scripts/*.py`、`templates/`、`SKILL.md` 或 `examples/` 之后，请确保三份自测仍然全绿：
+改动 `scripts/*.py`、`templates/`、`SKILL.md`、`AGENTS.md`、`references/` 或 `examples/` 之后，请确保三份自测仍然全绿
+（改过 `SKILL.md`、`AGENTS.md` 或 `references/` 还要单独跑 `check_skill.py`）：
 
 ```bash
 python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 python scripts/check_contract.py --selftest
+python scripts/check_skill.py SKILL.md   # 改过 SKILL.md / AGENTS.md / references/ 之后要跑
 python scripts/mutate_checks.py     # 动了闸门源码就要跑：48 处变异必须全部被抓住
 ```
 

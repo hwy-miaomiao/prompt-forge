@@ -48,6 +48,7 @@ prompt-forge/
 ├── SKILL.md             # 安装成 Agent Skill 时的入口
 ├── CLAUDE.md            # 让 Claude Code 也读 AGENTS.md
 ├── README.md            # 给人看的说明
+├── README.en.md         # 英文说明（与 README.md 互链）
 ├── .github/workflows/   # CI：三份自测 + 变异检验 + 三件仓库级检查：资产过闸门 / 反例被拦下 / 全 LF（见第 5 节）
 ├── references/          # 方法论：需求问询 / 提示词结构 / 参考样例库 / 模糊词换算表 / 校验清单 / 踩坑记录 / 方法论出处
 ├── templates/           # 提示词骨架、需求确认模板
