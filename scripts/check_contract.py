@@ -46,6 +46,7 @@ import argparse
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -61,7 +62,9 @@ C_WARN_CODES = ("C2", "C4", "C5")
 #: 纸张规格后缀：`A4 纸` / `A3 幅面` / `A0/A1 幅面` / `A2 出图` 里的编号不是验收编号（审计 P25）。
 #: 只认**完整的词**：旧版把裸「出」也算后缀，于是 `R9 出错` / `A9 出现` / `R9 出发` 被当成纸张规格
 #: 静默吞掉，引用了不存在的编号照样绿灯（第 5 轮审计 R5-PF-G3-01）。词表 = 闸门① 的纸张词 + 打印用语。
-_PAPER_SPEC_WORDS = cp.PAPER_SPEC_WORDS + ("出图", "出片")
+#: 第 7 轮审计 R7-PF-G3-04：`A4 尺寸` / `A4 大小` / `A4 规格` / `A4 厚薄` 同样是纸张规格的说法，
+#: 旧词表只认「纸/图纸/幅面/幅/开本/出图/出片」，于是这些写法被当成验收 A4 报假 C1。
+_PAPER_SPEC_WORDS = cp.PAPER_SPEC_WORDS + ("出图", "出片", "尺寸", "大小", "规格", "厚薄")
 _PAPER_SPEC_TAIL_RE = re.compile(
     r"^\s*(?:的\s*)?(?:/\s*[A-Za-z]?\d+\s*)*(?:"
     + "|".join(re.escape(word) for word in sorted(_PAPER_SPEC_WORDS, key=len, reverse=True))
@@ -136,6 +139,30 @@ def find_section(sections: list[tuple[str, int, int, int, bool]], number: int) -
     return None
 
 
+def item_ranges_for(
+    sections: list[tuple[str, int, int, int, bool]], number: int
+) -> list[tuple[int, int]] | None:
+    """第 `number` 段的条目区间（含子标题子树）；绑不上返回 None（退回全文兜底）。
+
+    第 7 轮审计 R7-PF-G3-01：C1 的 known 不能由**全文任意**「列表符号 + R#/A# 开头」的行
+    生成 —— 第 5/9 段写一句 `- R9 旧编号，本版不做。` 就会让 A# 里悬空的 `对应 R9`
+    被当成合法引用，两闸门一起绿灯。这里与闸门① 的 `_item_ranges` 同口径：只认绑定段
+    （含子标题）里的正式条目。绑定不到时退回全文：那时闸门① 的 E1 已经红了，
+    本闸门再叠一条「悬空引用」只会误导人。
+    """
+    sec = find_section(sections, number)
+    if sec is None:
+        return None
+    start, end = sec
+    pos = next((i for i, section in enumerate(sections) if section[2] == start), None)
+    if pos is not None:
+        level = sections[pos][1]
+        while pos + 1 < len(sections) and sections[pos + 1][1] > level:
+            pos += 1
+            end = max(end, sections[pos][3])
+    return [(start, end)]
+
+
 def item_line(lines: list[str], fenced: list[bool], letter: str) -> dict[int, int]:
     """编号 -> 定义它的那一行（1 基）。报错要指向条目自己那一行，不是段标题。"""
     out: dict[int, int] = {}
@@ -162,6 +189,38 @@ def _definition_end(line: str, letter: str) -> int:
     return (len(line) - len(stripped)) + (len(stripped) - len(probe)) + match.end()
 
 
+#: 反引号里只写编号（`` `R9` `` / `` `A2、A3` ``）是**引用**，不是代码示例：抹白前要先单独查
+#: （第 7 轮审计 R7-PF-G3-02）。含其它文字的代码片段（`` `参考 R9 的旧格式` ``）仍按示例处理，
+#: 不因为「反引号里出现编号」就逼出假 C1。
+_CODE_SPAN_REF_RE = re.compile(r"[RA]\d+(?:\s*[、,，/\\和及与]\s*[RA]\d+)*")
+#: A 系列编号**前面**是纸张语境时（`页面规格写 `A4``、`按 A4 纸幅面…`）也不是验收编号。
+#: 后置词还是走 `_PAPER_SPEC_TAIL_RE`；这里只补「词在前、编号在后」的一种。
+_PAPER_CONTEXT_BEFORE_RE = re.compile(
+    r"(?:"
+    + "|".join(re.escape(word) for word in sorted(_PAPER_SPEC_WORDS, key=len, reverse=True))
+    + r")[^。；\n]{0,8}$"
+)
+
+
+def _missing_ref(letter: str, num: int, line_no: int) -> cp.Finding:
+    """C1 的报错文案：两种扫描路径（正文编号 / 反引号纯编号引用）共用一份。"""
+    label = LABEL_REQ if letter == "R" else LABEL_ACC
+    return cp.Finding(
+        "ERROR", "C1",
+        f"引用了不存在的 {letter}{num}（第 {label} 段里没有这条编号）——"
+        "执行的人会卡在这里猜，编号要么补上、要么改掉",
+        line_no,
+    )
+
+
+def _paper_spec_near(text: str, start: int, end: int) -> bool:
+    """这个 A 系列编号是不是纸张规格：`A4 尺寸`（后置词）或 `页面规格写 `A4``（前置词）。"""
+    return bool(
+        _PAPER_SPEC_TAIL_RE.match(text[end:])
+        or _PAPER_CONTEXT_BEFORE_RE.search(text[:start])
+    )
+
+
 def check_refs(
     lines: list[str], fenced: list[bool], indented: list[bool], known: dict[str, set[int]]
 ) -> list[cp.Finding]:
@@ -170,6 +229,9 @@ def check_refs(
     围栏代码块与缩进代码块都跳过：那是「期望输出示例」，里面的编号是别人的文字，
     不是这份文档的引用（第 5 轮审计 R5-PF-G3-03；闸门① 早就在用 `fence_lines` +
     `indented_code_lines` 屏蔽这两类代码样例了）。
+
+    行内代码里的编号分两类（第 7 轮审计 R7-PF-G3-02）：纯编号引用 `` `R9` `` / `` `A2、A3` ``
+    是引用，照查；带说明文字的代码片段是示例，照旧抹白跳过。
     """
     findings: list[cp.Finding] = []
     for idx, line in enumerate(lines):
@@ -178,6 +240,14 @@ def check_refs(
         clean = cp.strip_comments(line)
         if not clean.strip():
             continue
+        # 先收集「纯编号引用」的代码片段（偏移量按原文记，下面等长替换不影响）。
+        code_refs: list[tuple[str, int, int, int]] = []
+        for span in cp.CODE_SPAN_RE.finditer(clean):
+            body = span.group(0).strip("`").strip()
+            if not _CODE_SPAN_REF_RE.fullmatch(body):
+                continue
+            for token in re.finditer(r"([RA])(\d+)(?!\d)", body):
+                code_refs.append((token.group(1), int(token.group(2)), span.start(), span.end()))
         # 行内代码里的是示例，不是引用（审计 P25）：等长替换成空格，偏移量不变。
         clean = cp.CODE_SPAN_RE.sub(lambda m: " " * len(m.group(0)), clean)
         for letter, label in (("R", LABEL_REQ), ("A", LABEL_ACC)):
@@ -191,12 +261,12 @@ def check_refs(
                     continue
                 num = int(match.group(1))
                 if num not in known[letter]:
-                    findings.append(cp.Finding(
-                        "ERROR", "C1",
-                        f"引用了不存在的 {letter}{num}（第 {label} 段里没有这条编号）——"
-                        "执行的人会卡在这里猜，编号要么补上、要么改掉",
-                        idx + 1,
-                    ))
+                    findings.append(_missing_ref(letter, num, idx + 1))
+        for letter, num, span_start, span_end in code_refs:
+            if letter == "A" and _paper_spec_near(clean, span_start, span_end):
+                continue  # 反引号里的 `A4 尺寸` / `页面规格写 `A4`` 也还是纸张规格
+            if num not in known[letter]:
+                findings.append(_missing_ref(letter, num, idx + 1))
     return findings
 
 
@@ -214,12 +284,16 @@ def keywords(text: str) -> set[str]:
 
 
 def check_step_coverage(
-    lines: list[str], fenced: list[bool], sections: list[tuple[str, int, int, int, bool]], requirements: set[int]
+    lines: list[str], fenced: list[bool], indented: list[bool],
+    sections: list[tuple[str, int, int, int, bool]], requirements: set[int]
 ) -> list[cp.Finding]:
     """C2：每条需求都要在第 9 段里有人干（`（对应 R#）`）。
 
     报错行指向**第 9 段的标题**而不是那条需求：要改的地方是步骤，不是需求本身
     （豁免注释因此也写在第 9 段里 —— 作用域判据见 `apply_ignores`）。
+
+    缩进代码块不参与（第 7 轮审计 R7-PF-G3-05）：第 9 段里贴一段「别人的步骤示例」，
+    示例里的 `参考 R2 的写法` 不该算这条需求已经有人干 —— 那是示例，不是这份文档的步骤。
     """
     if not requirements:
         return []
@@ -229,7 +303,7 @@ def check_step_coverage(
     start, end = sec
     seen: set[int] = set()
     for idx in range(start + 1, min(end, len(lines))):
-        if fenced[idx]:
+        if fenced[idx] or indented[idx]:
             continue
         seen |= {int(m) for m in re.findall(r"R(\d+)(?!\d)", cp.strip_comments(lines[idx]))}
     seen &= requirements
@@ -293,15 +367,21 @@ def _assumption_block(lines: list[str], idx: int, lo: int, hi: int) -> str:
 
 
 def check_open_items(
-    lines: list[str], fenced: list[bool], sections: list[tuple[str, int, int, int, bool]]
+    lines: list[str], fenced: list[bool], indented: list[bool],
+    sections: list[tuple[str, int, int, int, bool]]
 ) -> list[cp.Finding]:
-    """C3/C4：第 10 段每条「未确认」都要在第 11 段有落脚点。"""
+    """C3/C4：第 10 段每条「未确认」都要在第 11 段有落脚点。
+
+    围栏代码块与缩进代码块都不算（第 7 轮审计 R7-PF-G3-05）：第 10 段常有一句
+    「写法示例：`未确认：…`」的样例，那不是真待办 —— 拿它去对第 11 段只会假红 C3。
+    """
     sec10 = find_section(sections, 10)
     if sec10 is None:
         return []
+    lo, hi = sec10[0] + 1, min(sec10[1], len(lines))
     pending: list[tuple[int, str]] = []
-    for idx in range(sec10[0] + 1, min(sec10[1], len(lines))):
-        if fenced[idx]:
+    for idx in range(lo, hi):
+        if fenced[idx] or indented[idx]:
             continue
         clean = cp.strip_comments(lines[idx]).strip()
         if _mentions_unconfirmed(clean):
@@ -313,7 +393,9 @@ def check_open_items(
     body11 = ""
     if sec11 is not None:
         body11 = "\n".join(
-            cp.strip_comments(lines[i]) for i in range(sec11[0] + 1, min(sec11[1], len(lines))) if not fenced[i]
+            cp.strip_comments(lines[i])
+            for i in range(sec11[0] + 1, min(sec11[1], len(lines)))
+            if not fenced[i] and not indented[i]
         )
     if sec11 is None or cp.is_empty_claim(body11):
         return [cp.Finding(
@@ -323,11 +405,35 @@ def check_open_items(
             pending[0][0],
         )]
 
+    # 第 7 轮审计 R7-PF-G3-06：一整块连续非空行里可能压着几百条「未确认」，逐条回头扫块、
+    # 逐条重算 keywords 是平方级（1600 条 32KB 实测 9s+）。先把块边界线性扫一遍，
+    # 再按块缓存 keywords —— 同一块里的候选词集只算一次。
+    block_of: dict[int, tuple[int, int]] = {}
+    idx = lo
+    while idx < hi:
+        if not lines[idx].strip() or cp.HEADING_RE.match(lines[idx]):
+            idx += 1
+            continue
+        block_start = idx
+        while idx < hi and lines[idx].strip() and not cp.HEADING_RE.match(lines[idx]):
+            idx += 1
+        for row in range(block_start, idx):
+            block_of[row] = (block_start, idx)
+
     known = keywords(body11)
     findings: list[cp.Finding] = []
+    block_cache: dict[tuple[int, int], set[str]] = {}
     for line_no, text in pending:
-        block = _assumption_block(lines, line_no - 1, sec10[0] + 1, min(sec10[1], len(lines)))
-        if keywords(block) & known:
+        span = block_of.get(line_no - 1)
+        if span is None:
+            # 理论上 pending 行都落在某个块里；拿不到时退回旧的逐行扫描（保留兜底语义）。
+            block = _assumption_block(lines, line_no - 1, lo, hi)
+            block_words = keywords(block)
+        else:
+            if span not in block_cache:
+                block_cache[span] = keywords("\n".join(lines[span[0]:span[1]]))
+            block_words = block_cache[span]
+        if block_words & known:
             continue
         snippet = re.sub(r"\s+", " ", text)[:60]
         findings.append(cp.Finding(
@@ -394,7 +500,10 @@ def check_contract(
     要说清「跨段一致性没有可检查的对象」，否则一个光秃秃的「0 ERROR, 0 WARN —— 通过」
     会被当成「这份文件跨段一致性没问题」（段落齐不齐是闸门① 的事）。
     """
-    raw = cp.read_text(path)
+    # 与闸门① 同一套归一化（第 7 轮审计 R7-PF-G3-03）：零宽字符、NBSP、全角字母
+    # 都是复制粘贴带进来的噪音。不归一的话同一份文件闸门① 认 `Ｒ1` / `R\u200b1`、闸门③ 不认，
+    # 两个闸门对同一个编号给出相反结论。normalize_invisible 不增删换行，行号视图不受影响。
+    raw = cp.normalize_invisible(cp.read_text(path))
     # 两套行视图，行号一一对应（见 check_prompt.check_file 里同样的分法）：
     #   text_lines —— 原文：pf-ignore 注释本身在这一版；
     #   lines      —— 正文：跨段一致性只看正文，注释里的标题 / R# / A# 不算数（审计 F1）。
@@ -403,14 +512,17 @@ def check_contract(
     fenced = cp.fence_lines(lines)
     indented = cp.indented_code_lines(lines, fenced)
     sections, _preamble = cp.split_sections(lines)
-    requirements, _dups_r = cp.collect_items(lines, "R")
-    acceptances, _dups_a = cp.collect_items(lines, "A")
+    # 条目定义只认绑定段（第 4 / 7 段，含子标题）里的正式条目（第 7 轮审计 R7-PF-G3-01）：
+    # 全文扫描时，任意段落里一行 `- R9 旧编号，本版不做。` 都会被当成 R9 的定义，
+    # 于是 A# 里悬空的 `对应 R9` 两闸门一起绿灯。绑定不到时退回全文（闸门① 会报 E1）。
+    requirements, _dups_r = cp.collect_items(lines, "R", ranges=item_ranges_for(sections, 4))
+    acceptances, _dups_a = cp.collect_items(lines, "A", ranges=item_ranges_for(sections, 7))
     known = {"R": set(requirements), "A": set(acceptances)}
 
     findings: list[cp.Finding] = []
     findings.extend(check_refs(lines, fenced, indented, known))
-    findings.extend(check_step_coverage(lines, fenced, sections, known["R"]))
-    findings.extend(check_open_items(lines, fenced, sections))
+    findings.extend(check_step_coverage(lines, fenced, indented, sections, known["R"]))
+    findings.extend(check_open_items(lines, fenced, indented, sections))
     findings.extend(check_judgements(lines, fenced, acceptances))
 
     # 豁免注释无论 --no-ignore 都要解析：写错的豁免（给 ERROR 码、码不认识、理由太短）
@@ -640,10 +752,49 @@ def selftest() -> int:
         ("C5 反引号里只写命令名也算给了命令",
          lambda: sub(base, "判定：人工 看 main 分支。", "判定：命令 `pytest`，看退出码。"),
          set(), set(), set(), ""),
+        # —— 第 7 轮审计撞出来的假绿/假红（R7-PF-G3-01/02/03/04/05）——
+        ("C1 别段伪条目不算定义：第 5 段写 R9 不能给悬空引用洗白（R7-PF-G3-01）",
+         lambda: sub(sub(base, "## 5. 非目标",
+                         "## 5. 非目标\n\n- R9 旧编号这版不做。"),
+                     step2, step2.replace("（对应 R2）", "（对应 R2、R9）")),
+         {"C1"}, set(), set(), ""),
+        ("C1 反引号里只写编号仍是引用，要报 C1（R7-PF-G3-02）",
+         lambda: sub(base, step2, step2.replace("（对应 R2）", "（对应 R2、`R9`）")),
+         {"C1"}, set(), set(), ""),
+        ("C1 反引号里带说明文字的示例不逼出假 C1（R7-PF-G3-02 防过紧）",
+         lambda: sub(base, "判定：阈值 跳过行数 ≤ 3。",
+                     "判定：阈值 跳过行数 ≤ 3，格式见 `参考 R9 的旧格式`。"),
+         set(), set(), set(), ""),
+        ("C1 全角 Ｒ1 定义与闸门① 同口径认得出（R7-PF-G3-03）",
+         lambda: sub(base, "- **R1** 读取", "- **Ｒ1** 读取"),
+         set(), set(), set(), ""),
+        ("C1 零宽分隔 R\u200b1 定义与闸门① 同口径认得出（R7-PF-G3-03）",
+         lambda: sub(base, "- **R1** 读取", "- **R\u200b1** 读取"),
+         set(), set(), set(), ""),
+        ("C1 A4 尺寸 / A7 大小 / A8 规格 都是纸张规格，不算验收编号（R7-PF-G3-04）",
+         lambda: sub(base, "## 4. 需求（R#）",
+                     "## 4. 需求（R#）\n\n- 按 A4 尺寸、A7 大小与 A8 规格排版。"),
+         set(), set(), set(), ""),
+        ("C2 缩进代码块里的示例编号不算覆盖（R7-PF-G3-05）",
+         lambda: sub(sub(base, "## 9. 执行步骤",
+                         "## 9. 执行步骤\n\n示例：\n\n    参考 R2 的写法"),
+                     step2, step2.replace("（对应 R2）", "")),
+         set(), {"C2"}, set(), ""),
+        ("C3 缩进代码块里的「未确认」示例不算待办（R7-PF-G3-05）",
+         lambda: sub(sub(base,
+                         "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                         "示例：\n\n    这里写 未确认 的样例"),
+                     section11, "无。"),
+         set(), set(), set(), ""),
+        ("C2 第 9 段标题夹零宽字符仍认得出（R7-PF-G3-03 跨闸门一致性）",
+         lambda: sub(sub(base, "## 9. 执行步骤", "## 9. 执\u200b行步骤"),
+                     step2, step2.replace("（对应 R2）", "")),
+         set(), {"C2"}, set(), ""),
     ]
 
     failed = 0
-    print(f"闸门③ 自测：{len(cases)} 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例")
+    print(f"闸门③ 自测：{len(cases)} 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例"
+          f" + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例")
     with tempfile.TemporaryDirectory() as tmp:
         for idx, (name, build, want_errors, want_warns, want_ignored, want_msg) in enumerate(cases):
             try:
@@ -743,6 +894,46 @@ def selftest() -> int:
                 failed += 1
                 for finding in findings:
                     print("      " + finding.render())
+
+        # 闸门①/③ 必须对同一份文件给出一致结论（R7-PF-G3-03）：全角字母、零宽字符是
+        # 复制粘贴常态，一个闸门认、另一个不认，用户会看到「闸门① 过、闸门③ 报 6 条 C1」的假红。
+        # 基准件里「美观」是闸门① E9 的故意埋点，跨闸门对比前先把这处换成可验收写法。
+        clean = sub(base, "输出界面要美观", "输出界面控制在两行以内")
+        consistency_cases = [
+            ("全角Ｒ1 定义", lambda: sub(clean, "- **R1** 读取", "- **Ｒ1** 读取")),
+            ("零宽分隔 R\u200b1 定义", lambda: sub(clean, "- **R1** 读取", "- **R\u200b1** 读取")),
+        ]
+        for name, build in consistency_cases:
+            text = build()
+            path = Path(tmp) / "cross-gate.prompt.md"
+            path.write_text(text, encoding="utf-8")
+            prompt_findings, _size = cp.check_file(path)
+            contract_findings, _size2, _note = check_contract(path)
+            errors = [f.render() for f in prompt_findings + contract_findings if f.level == "ERROR"]
+            ok = not errors
+            print(f"{'PASS' if ok else 'FAIL'}  [闸门③] 跨闸门一致：{name}，闸门① 与闸门③ 都 0 ERROR")
+            if not ok:
+                failed += 1
+                for line in errors:
+                    print("      " + line)
+
+        # 病态输入性能（R7-PF-G3-06）：第 10 段一整块里压 1600 条「未确认」时，旧实现
+        # 逐条回头扫块、逐条重算整块关键词，是 O(n²)（实测 9s+）。现在按块缓存，必须线性量级。
+        many = "\n".join(f"- 未确认：第 {i} 条待用户拍板。" for i in range(1600))
+        text = sub(base, "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。", many)
+        path = Path(tmp) / "perf-pending.prompt.md"
+        path.write_text(text, encoding="utf-8")
+        started = time.perf_counter()
+        findings, _size, _note = check_contract(path)
+        elapsed = time.perf_counter() - started
+        got_errors = [f for f in findings if f.level == "ERROR"]
+        ok = not got_errors and elapsed < 1.0
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门③] 1600 条连续「未确认」线性量级："
+              f"{elapsed:.2f}s（应 < 1s），ERROR {len(got_errors)}（期望 0）")
+        if not ok:
+            failed += 1
+            for finding in findings:
+                print("      " + finding.render())
 
     print(f"\n自测结果：{'全部通过' if not failed else f'{failed} 个用例不通过'}")
     return 1 if failed else 0

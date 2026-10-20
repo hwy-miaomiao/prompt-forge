@@ -35,6 +35,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import check_prompt as cp  # noqa: E402  （同目录，故意复用闸门① 的字符串归一化口径）
+
 def _setup_stdout() -> None:
     """管道/重定向时强制 UTF-8（避免 Windows 上按 GBK 输出被读成乱码）；
     真实控制台保留本机编码，只保证不可表示的字符不炸。"""
@@ -524,6 +528,11 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
 
     name = fields.get("name", "")
     desc = fields.get("description", "")
+    # 判定标记按归一化后的文字匹配（第 7 轮审计 R7-PF-G2-01）：description 是从聊天窗口
+    # 复制来的，常混进零宽字符（U+200B/FEFF）或全角字母（`Ｄo NOT use`）。视觉上「不接」
+    # 明明还在，逐字符比较却找不到 → 假 E6/E5，等于逼用户去改一个肉眼看不见的字符。
+    # name 不归一：它是宿主侧登记用的标识符，必须逐字符一致（E2/E3 该红就红）。
+    desc_probe = cp.normalize_invisible(desc)
     if not name:
         findings.append(Finding("ERROR", "E1", "frontmatter 缺 `name`（宿主靠它登记这个技能）", 1))
     if not desc:
@@ -545,7 +554,7 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
 
     # ---- description
     if desc:
-        head = desc[:CATALOG_RENDER_MAX]
+        head = desc_probe[:CATALOG_RENDER_MAX]  # 前 500 字按归一化后的文字算，长度按原文算
         if len(desc) > DESC_MAX:
             findings.append(Finding("ERROR", "E4",
                                     f"description 有 {len(desc)} 字符，超过规范上限 {DESC_MAX}；"
@@ -566,18 +575,20 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
                                     f"description 有 {len(desc)} 字符，超过 {CATALOG_RENDER_MAX}；"
                                     f"有的宿主只渲染前 {CATALOG_RENDER_MAX} 字（DSH 的 catalogDescriptionMaxLength 默认值），"
                                     f"把最强的触发信号放前面", desc_line))
-        if not has_marker(desc, IMPERATIVE_MARKERS):
+        if not has_marker(desc_probe, IMPERATIVE_MARKERS):
             findings.append(Finding("WARN", "W2",
                                     "description 不是祈使句；官方指南要求写成给模型的指令"
                                     "（「使用本技能：当…」/“Use this skill when…”），不是「这个技能做 X」", desc_line))
-        elif has_marker(desc, THIRD_PERSON_MARKERS):
+        elif has_marker(desc_probe, THIRD_PERSON_MARKERS):
             findings.append(Finding("WARN", "W2",
                                     "description 里混了第三人称自我介绍（「本技能是…」）；"
                                     "官方指南要求祈使句，第三人称在路由上没有帮助", desc_line))
 
     # ---- 正文
     body_lines = lines[fm_end:] if fm_end else []
-    body = "\n".join(body_lines)
+    # 正文的声明类检查同样按归一化文字匹配（第 7 轮审计 R7-PF-G2-01）：零宽字符插在
+    # 「不接」「分诊」这类标记中间时语义没变，只有逐字符比较会翻车。
+    body = cp.normalize_invisible("\n".join(body_lines))
     # 声明类的检查只看正文本身，不看正文里引用的样例代码块（围栏 + 缩进两类都剥）。
     prose = _strip_indented_code(strip_fences(body))
     body_start = fm_end + 1  # 1-based 行号，正文第一行（fm_end 已经是闭合 `---` 的行号）
@@ -779,6 +790,19 @@ def selftest() -> int:
         ("只拷 SKILL.md 且依赖写成 .\\AGENTS.md",
          lambda: sub(SELFTEST_FIXTURE, "`AGENTS.md`", "`.\\AGENTS.md`"),
          {"E7"}),
+        # ---- 第 7 轮审计：复制粘贴带进来的不可见字符不该造成假 E5/E6（R7-PF-G2-01）----
+        # 零宽字符插在边界词中间：视觉与真实描述完全一致，只是逐字符比较找不到
+        ("边界词「不接」中间夹零宽字符",
+         lambda: sub(SELFTEST_FIXTURE, "不接：已经", "不\u200b接：已经"), set()),
+        # 英文边界写成全角字母：归一化后就是 Do NOT use
+        ("英文边界写成全角（Ｄo NOT use）",
+         lambda: sub(SELFTEST_FIXTURE, desc_line,
+                     "description: When the user needs a demo, use this skill. Ｄo NOT use for chat."), set()),
+        # 触发词中间夹零宽：除了「使用本技能」没有别的「何时该用」标记，必须靠归一化认出来
+        ("触发词「使用本技能」中间夹零宽字符",
+         lambda: sub(SELFTEST_FIXTURE, desc_line,
+                     "description: 把一句话需求整理成可执行提示词时使用本技能；不接纯问答。"
+                     .replace("使用", "使\u200b用")), set()),
     ]
 
     # 这两个用例本来就靠"不改夹具"来表达意图：正例是基准件，E7 是"文件没少、只是没拷过来"

@@ -51,7 +51,7 @@ Seven key designs:
 4. **The menu only asks "how thick", never "what to do"**: the phase 2.5 expansion menu controls whether this prompt should include things like performance budgets, error handling, or tests — **every item ships with a default tier**, so ticking none of them means taking all defaults (the official line is "Provide defaults, not menus"; for this repo's compromise, see section 4.5 of [`references/方法论出处.md`](references/方法论出处.md)).
 5. **The prompt is written for a stranger**: delete this entire conversation, and another AI reading only this file must still be able to start.
 6. **Every rule is sourced**: `references/方法论出处.md` states item by item whether something is official documentation, an industry standard, or this repo's own design choice — what is borrowed and what is made up is visible at a glance.
-7. **The gates are tested too**: all three gates are zero-dependency scripts, and `--selftest` runs them against real positive and negative examples; additionally `scripts/mutate_checks.py` corrupts the gate source in 48 places, and every one of them must turn the corresponding selftest red — this guards against "selftests that run empty, all green while actually checking nothing".
+7. **The gates are tested too**: all three gates are zero-dependency scripts, and `--selftest` runs them against real positive and negative examples; additionally `scripts/mutate_checks.py` corrupts the gate source in 56 places, and every one of them must turn the corresponding selftest red — this guards against "selftests that run empty, all green while actually checking nothing".
 
 ## Quick start
 
@@ -101,8 +101,8 @@ python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 # PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
 # PASS  [闸门] 正例夹具: ERROR 码 []（期望 []）
-# ... 56 cases in total (2 directory-link cases genuinely run: symlink on Linux, junction on Windows; environments where neither can be created report SKIP, not counted as failures)
-#     = the real SKILL.md + 9 real examples + 46 built-in gate cases (1 + 9 + 46 = 56; including line numbers, BOM,
+# ... 59 cases in total (2 directory-link cases genuinely run: symlink on Linux, junction on Windows; environments where neither can be created report SKIP, not counted as failures)
+#     = the real SKILL.md + 9 real examples + 49 built-in gate cases (1 + 9 + 49 = 59; including line numbers, BOM,
 #     long-sentence triggering, `go` not being matched by `good` / `Go 语言`, "不接（kill）" not
 #     counting as writing "接", etc.)
 
@@ -110,10 +110,10 @@ python scripts/check_skill.py --selftest
 python scripts/check_contract.py --selftest
 # PASS  [闸门③] 基准件：闸门① 的自测夹具跨段也对得上: ERROR 码 []（期望 []） WARN 码 []（期望 []）
 # PASS  [闸门③] C1 引用了不存在的需求号: ERROR 码 ['C1']（期望 ['C1']） WARN 码 []（期望 []）
-# ... 35 cases + 2 --no-ignore cases + 1 line-number case + 2 scope-note cases
+# ... 44 cases + 2 --no-ignore cases + 1 line-number case + 2 scope-note cases + 2 cross-gate consistency cases + 1 performance case
 #     (C1/C3 are ERROR, C2/C4/C5 are WARN; the last two are "scope-note" cases: nothing to check / a requirement exists but section 9 is missing, so C2 has nothing to check)
 
-# Mutation test: corrupt the gate source in 48 places; every one of them must make the corresponding selftest red (the selftest did run empty once — see pitfall log #29)
+# Mutation test: corrupt the gate source in 56 places; every one of them must make the corresponding selftest red (the selftest did run empty once — see pitfall log #29)
 python scripts/mutate_checks.py
 ```
 
@@ -174,7 +174,7 @@ All checks and fixes are in [`references/校验清单.md`](references/校验清�
 
 ```bash
 python scripts/check_skill.py SKILL.md
-python scripts/check_skill.py --selftest   # 56 cases (2 link-install cases genuinely run: symlink on Linux / junction on Windows; environments where neither can be created report SKIP)
+python scripts/check_skill.py --selftest   # 59 cases (2 link-install cases genuinely run: symlink on Linux / junction on Windows; environments where neither can be created report SKIP)
 ```
 
 It checks whether "automatic recognition" can hold:
@@ -190,7 +190,7 @@ It checks whether "automatic recognition" can hold:
 
 ```bash
 python scripts/check_contract.py <输出目录>/prompt.md
-python scripts/check_contract.py --selftest   # 35 cases + 2 --no-ignore cases + 1 line-number case + 2 scope-note cases
+python scripts/check_contract.py --selftest   # 44 cases + 2 --no-ignore cases + 1 line-number case + 2 scope-note cases + 2 cross-gate consistency cases + 1 performance case
 ```
 
 Getting the sections themselves right (that is gate ①'s job) does not mean **the sections line up with each other**:
@@ -283,7 +283,7 @@ python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 python scripts/check_contract.py --selftest
 python scripts/check_skill.py SKILL.md   # run after changing SKILL.md / AGENTS.md / references/
-python scripts/mutate_checks.py     # must run if you touched the gate source: all 48 mutations must be caught
+python scripts/mutate_checks.py     # must run if you touched the gate source: all 56 mutations must be caught
 ```
 
 When adding a check, add a negative example and **first run it against a real file to confirm the expected ERROR code** — writing the expected value from intuition turns the selftest into an "always passes" decoration; then add the key line of the new check to `MUTATIONS` in `scripts/mutate_checks.py`, so that "the selftest got blinded" also goes red. CI runs all of these for you (both Python 3.9 and 3.12).

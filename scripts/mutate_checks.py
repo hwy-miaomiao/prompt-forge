@@ -213,7 +213,7 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "C4 一律认为对得上", "check_contract.py",
-        "        if keywords(block) & known:",
+        "        if block_words & known:",
         "        if True:",
     ),
     Mutation(
@@ -223,7 +223,7 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "纸张规格退回裸字「出」（R9 出错被当成规格吞掉）", "check_contract.py",
-        '_PAPER_SPEC_WORDS = cp.PAPER_SPEC_WORDS + ("出图", "出片")',
+        '_PAPER_SPEC_WORDS = cp.PAPER_SPEC_WORDS + ("出图", "出片", "尺寸", "大小", "规格", "厚薄")',
         '_PAPER_SPEC_WORDS = ("出",)',
     ),
     Mutation(
@@ -336,6 +336,61 @@ MUTATIONS: list[Mutation] = [
         "            continue  # 缩进代码块里的示例不是真豁免",
         "        if False:\n"
         "            continue  # 缩进代码块里的示例不是真豁免",
+    ),
+    # ---- 第 7 轮审计的 7 条修复（R7-PF-G3-01..06 / R7-PF-G2-01）各留一处变异 ----
+    Mutation(
+        "C1 的 known 退回全文扫描（别段伪条目给悬空引用洗白）", "check_contract.py",
+        'cp.collect_items(lines, "R", ranges=item_ranges_for(sections, 4))',
+        'cp.collect_items(lines, "R", ranges=None)',
+    ),
+    Mutation(
+        "行内代码里只写编号的引用不再查（反引号 `R9` 漏报 C1）", "check_contract.py",
+        "            if not _CODE_SPAN_REF_RE.fullmatch(body):\n"
+        "                continue",
+        "            if False:\n"
+        "                continue",
+    ),
+    Mutation(
+        "跨段闸门不再归一化不可见字符（全角/零宽定义假红 C1）", "check_contract.py",
+        "    raw = cp.normalize_invisible(cp.read_text(path))",
+        "    raw = cp.read_text(path)",
+    ),
+    Mutation(
+        "纸张规格词表退回漏「尺寸/大小/规格」（A4 尺寸假红 C1）", "check_contract.py",
+        '_PAPER_SPEC_WORDS = cp.PAPER_SPEC_WORDS + ("出图", "出片", "尺寸", "大小", "规格", "厚薄")',
+        '_PAPER_SPEC_WORDS = cp.PAPER_SPEC_WORDS + ("出图", "出片")',
+    ),
+    Mutation(
+        "C2 第 9 段不再跳缩进代码块（示例编号冒充覆盖）", "check_contract.py",
+        "    for idx in range(start + 1, min(end, len(lines))):\n"
+        "        if fenced[idx] or indented[idx]:\n"
+        "            continue\n"
+        '        seen |= {int(m) for m in re.findall(r"R(\\d+)(?!\\d)", cp.strip_comments(lines[idx]))}',
+        "    for idx in range(start + 1, min(end, len(lines))):\n"
+        "        if fenced[idx]:\n"
+        "            continue\n"
+        '        seen |= {int(m) for m in re.findall(r"R(\\d+)(?!\\d)", cp.strip_comments(lines[idx]))}',
+    ),
+    Mutation(
+        "C3 第 10 段不再跳缩进代码块（示例「未确认」算待办）", "check_contract.py",
+        "    for idx in range(lo, hi):\n"
+        "        if fenced[idx] or indented[idx]:\n"
+        "            continue\n"
+        "        clean = cp.strip_comments(lines[idx]).strip()",
+        "    for idx in range(lo, hi):\n"
+        "        if fenced[idx]:\n"
+        "            continue\n"
+        "        clean = cp.strip_comments(lines[idx]).strip()",
+    ),
+    Mutation(
+        "C3/C4 按块缓存被删（1600 条连续未确认退回平方级）", "check_contract.py",
+        "            if span not in block_cache:",
+        "            if True:",
+    ),
+    Mutation(
+        "description 判定标记不再归一化（零宽「不接」假 E6）", "check_skill.py",
+        "    desc_probe = cp.normalize_invisible(desc)",
+        "    desc_probe = desc",
     ),
 ]
 
