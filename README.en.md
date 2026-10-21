@@ -7,9 +7,13 @@
 
 **Turn “help me build X” into a long prompt an AI can start from immediately.**
 
+**In one line: requirement clarification → 12-section contract → machine gates.** It is neither a prompt-template collection nor a replacement for spec-kit — it is the **upstream** of spec-kit `/specify`: clarify the fuzzy ask into a long prompt a stranger can execute, then hand it to the SDD flow to plan and build.
+
+**Name-clash note:** there is another `insaaniManav/prompt-forge` on GitHub (a prompt-engineering workbench written in Go; unrelated to this project). This repo is by hwy-miaomiao; its artifacts are `prompt.md` + `需求确认.md`, and its four zero-dependency gates live in `scripts/`.
+
 Most people use AI like this: throw one sentence at it → the AI guesses → what comes out is wrong → argue for three more rounds. The problem is not the AI's capability; it is that **the requirement was never stated clearly**: no deliverable path, no acceptance criteria, no boundaries, no "definition of done". prompt-forge turns "stating it clearly" into an executable process:
 
-> Any one-line requirement → **automatic triage** (take it if it should be taken; if not, explain why in one sentence) → one round of interview with recommended options and reference options (≤5 questions preferred, 9 max) → an expansion menu for "how thick to write it" (every item ships with a default tier) → a 12-section long prompt → gates ① and ③ at 0 ERROR → delivery.
+> Any one-line requirement → **automatic triage** (take it if it should be taken; if not, explain why in one sentence) → one round of interview with recommended options and reference options (≤5 questions preferred, 9 max) → an expansion menu for "how thick to write it" (every item ships with a default tier) → a 12-section long prompt → gates ①, ③ and ④ at 0 ERROR → delivery.
 
 **No trigger phrases to memorize.** It is not triggered by fixed patterns like "help me build X": the host hands the skill's `name` + `description` to the model, and the model decides semantically whether this input should use the skill. That is why the description states both "when to use it" and "when not to use it" — when triage says it should not be used, it says one sentence and suggests a better approach; it does not start the process on its own.
 
@@ -43,7 +47,7 @@ flowchart LR
     F -->|0 ERROR| G[Phase 5 delivery<br/>full text + path + the three most likely rework spots]
 ```
 
-Seven key designs:
+Eight key designs:
 
 1. **No trigger phrases to memorize**: the only routing surface is `description` in `SKILL.md`, and the model decides semantically whether to use the skill. Once it takes a request, the first thing it does is **state the judgment out loud** — take (`go`) / ask one question first (`needs-clarification`) / decline (`kill`); the three states follow GitHub spec-kit's terminology. Three criteria: is there a deliverable that can be pinned down; is it a task-level job; can the missing information be looked up by itself.
 2. **The interview is the only mandatory checkpoint**: without the user's explicit "accurate, start generating", it may not start writing the prompt.
@@ -51,7 +55,9 @@ Seven key designs:
 4. **The menu only asks "how thick", never "what to do"**: the phase 2.5 expansion menu controls whether this prompt should include things like performance budgets, error handling, or tests — **every item ships with a default tier**, so ticking none of them means taking all defaults (the official line is "Provide defaults, not menus"; for this repo's compromise, see section 4.5 of [`references/方法论出处.md`](references/方法论出处.md)).
 5. **The prompt is written for a stranger**: delete this entire conversation, and another AI reading only this file must still be able to start.
 6. **Every rule is sourced**: `references/方法论出处.md` states item by item whether something is official documentation, an industry standard, or this repo's own design choice — what is borrowed and what is made up is visible at a glance.
-7. **The gates are tested too**: all three gates are zero-dependency scripts, and `--selftest` runs them against real positive and negative examples; additionally `scripts/mutate_checks.py` corrupts the gate source in 61 places, and every one of them must turn the corresponding selftest red — this guards against "selftests that run empty, all green while actually checking nothing".
+7. **The gates are tested too**: all four gates are zero-dependency scripts, and `--selftest` runs them against real positive and negative examples; additionally `scripts/mutate_checks.py` corrupts the gate source in 78 places, and every one of them must turn the corresponding selftest red — this guards against "selftests that run empty, all green while actually checking nothing".
+8. **The process record goes through a gate too**: the triage state, the five-step evidence chain (intake → research → define → shape → decide), the interview mode, and each question's method source plus the `prompt.md` section it feeds are written into `需求确认.md` and checked field by field by gate ④. The interview also stops being improvised — `references/需求问询-方法映射.md` and `scripts/pick_methods.py` map the requirement shape and gaps to methods with default tiers.
+
 
 ## Quick start
 
@@ -74,7 +80,7 @@ cd prompt-forge
 Have an AI coding tool open this directory; it reads [`AGENTS.md`](AGENTS.md) first, then executes phase by phase.
 Under clone usage the output lands in `输出/<slug>/`.
 
-**First, verify all three gates are good**:
+**First, verify all four gates and the interview method library are good**:
 
 ```bash
 # Gate ①: check the produced long prompt itself (the 12-section contract)
@@ -84,7 +90,7 @@ python scripts/check_prompt.py --selftest
 # PASS  例3-logsift-json-export.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  反例-模糊需求.prompt.md: 16 ERROR（期望 >=5 ERROR）
 # PASS  templates/提示词骨架.md: 0 ERROR, 0 WARN（期望 0 ERROR 0 WARN）
-# ... 107 cases in total = these 5 real files + 102 built-in regressions (heading binding and
+# ... 120 cases in total = these 5 real files + 115 built-in regressions (heading binding and
 #     hijacking, fuzzy-word exemptions, an R# sample inside a fence not counting as an entry /
 #     a heading inside a fence not counting as a section / ~~~ also being a fence,
 #     a TODO inside a fence still reporting E10, an A# reference on a continuation line still
@@ -110,10 +116,18 @@ python scripts/check_skill.py --selftest
 python scripts/check_contract.py --selftest
 # PASS  [闸门③] 基准件：闸门① 的自测夹具跨段也对得上: ERROR 码 []（期望 []） WARN 码 []（期望 []）
 # PASS  [闸门③] C1 引用了不存在的需求号: ERROR 码 ['C1']（期望 ['C1']） WARN 码 []（期望 []）
-# ... 49 cases + 2 --no-ignore cases + 1 line-number case + 2 scope-note cases + 2 cross-gate consistency cases + 1 performance case
-#     (C1/C3 are ERROR, C2/C4/C5 are WARN; the last two are "scope-note" cases: nothing to check / a requirement exists but section 9 is missing, so C2 has nothing to check)
+# ... 54 cases + 2 --no-ignore cases + 1 line-number case + 2 scope-note cases + 2 cross-gate consistency cases + 1 performance case
+#     (C1/C3/C6 are ERROR, C2/C4/C5 are WARN; the last two are "scope-note" cases: nothing to check / a requirement exists but section 9 is missing, so C2 has nothing to check)
 
-# Mutation test: corrupt the gate source in 61 places; every one of them must make the corresponding selftest red (the selftest did run empty once — see pitfall log #29)
+# Gate ④: check 需求确认.md (the process record: triage / evidence chain / interview mode / method sources / traceability)
+python scripts/check_confirm.py --selftest
+# ... 56 cases + 2 --no-ignore cases + 1 template negative case (a template submitted as-is must be caught)
+
+# Interview method library: methods with default tiers for a requirement shape and its gaps
+python scripts/pick_methods.py --selftest
+# ... 14 checks
+
+# Mutation test: corrupt the gate source in 78 places; every one of them must make the corresponding selftest red (the selftest did run empty once — see pitfall log #29)
 python scripts/mutate_checks.py
 ```
 
@@ -128,15 +142,15 @@ python scripts/mutate_checks.py
 | 3 | Deliverables | Exact path + format + quantity |
 | 4 | Requirements (R#) | Numbered one by one, each verifiable, order is priority |
 | 5 | Non-goals | States explicitly what is not done; stops "while we're at it" expansion |
-| 6 | Technical constraints | Language version, dependencies, directories, style, prohibitions |
+| 6 | Technical constraints | Language version, dependencies, directories, style, prohibitions; model names / versions / API defaults must be checked against official docs, and marked `未确认` if unavailable |
 | 7 | Acceptance criteria (A#) | Each references an R#, each has `判定：` (verdict: command / threshold / manual) |
 | 8 | Verification method | Commands you can paste directly + expected output |
 | 9 | Execution steps | Phased, each step has an artifact, interruptible points marked, each step writes `（对应 R#）` (which R# it serves) |
-| 10 | Assumptions and open questions | Explicitly marks `未确认` (unconfirmed) and default values, with a matching stop condition in section 11 for every item |
+| 10 | Assumptions and open questions | Explicitly marks `未确认` (unconfirmed) and default values, with a matching stop condition in section 11 for every item; anything genuinely missing that must still be written now is marked `[NEEDS CLARIFICATION: …]` and paired one-to-one with an unconfirmed item |
 | 11 | When you must stop and ask a human | Recognizable trigger conditions (catches every item in section 10) |
-| 12 | Reporting format | What changed / how it was verified / what is left |
+| 12 | Reporting format | What changed / how it was verified / what is left; self-proof before reporting |
 
-There is also a `<输出目录>/需求确认.md`: every item the user signed off on, the user's own words, and each round of revision feedback with its impact scope.
+There is also a `<输出目录>/需求确认.md`: every item the user signed off on, the user's own words, and each round of revision feedback with its impact scope; the triage state, the five-step evidence chain, and each question's method source/traceability are recorded there too, and gate ④ checks them.
 
 ## What the requirement interview looks like
 
@@ -152,9 +166,11 @@ Q3. Delivery form (affects: deliverables section + acceptance section)
 
 "You decide" is a legitimate answer too: it becomes an explicit assumption with a default value, not a decision quietly made on the user's behalf.
 
+Questions are not improvised: `references/需求问询-方法映射.md` maps the requirement shape / gap dimensions / risk level to methods and default tiers, or run `python scripts/pick_methods.py --shape web --gaps 交付物,验收`. When a job spans several subsystems, or the user explicitly wants to go deep, switch to **one-question-at-a-time** mode (each message asks exactly one open question, with no option list; rules in section 10 of `references/需求问询.md`).
+
 ## Machine gates
 
-Delivering `prompt.md` requires gates ① and ③ both at 0 ERROR; gate ② is run separately after changing `SKILL.md` / `AGENTS.md` / `references/`; plus a mutation test specifically proving these three selftests do not run empty.
+Delivering `prompt.md` requires gates ①, ③ and ④ all at 0 ERROR; gate ② is run separately after changing `SKILL.md` / `AGENTS.md` / `references/`; plus a mutation test specifically proving these four selftests (and the interview method library) do not run empty.
 
 **Gate ①: the long prompt itself**
 
@@ -167,8 +183,8 @@ Here `<输出目录>`: under clone usage it is `输出/<slug>/`; under Skill usa
 It catches these structural problems: missing sections, too few requirements/acceptance items, duplicate numbers, acceptance not referencing requirements, acceptance without a decision method, requirements not covered by acceptance, non-goals written as "none", deliverables without a path, fuzzy words in the requirements section, leftover placeholders.
 All checks and fixes are in [`references/校验清单.md`](references/校验清单.md).
 
-- **14 ERROR codes in total** (`E0`~`E11`, with duplicate numbering counted separately as `E2b` / `E3b`);
-- **9 additional WARN codes** (`W1`~`W9`): whole text too short, a requirement with no verifiable object, assumptions section empty, too many requirement/acceptance items, only 1 non-goal, one sentence carrying multiple requirements, fuzzy words in non-requirement sections, synonymous-heading binding ambiguity. `W8` is reported only in these two shapes: ① one numbered + one unnumbered; ② the section still has another candidate heading **at the same level** (both numbered or both unnumbered) — as long as a same-level candidate exists in the same section it warns, regardless of which one comes first. Binding prefers the heading that actually writes this section's entries; only after that does it consider whether it is numbered, whether the number is right, and document order, and it reports the other heading together with its line number; a `### 4.1 Requirement supplement` hanging under `## 4. Requirements (R#)` is a subheading (different level) and **does not count** as ambiguity. Among them, `W8` is only an **ambiguity warning**: fuzzy words in the requirements and acceptance sections are judged by "heading alias hit" (a hit is `E9`), so a wrong binding never silently downgrades an ERROR to a WARN; W8 says "this section's heading has two spellings fighting each other, fix one".
+- **17 ERROR codes in total** (`E0`~`E14`, with duplicate numbering counted separately as `E2b` / `E3b`; new: E12 self-proof before reporting, E13 clarification-marker format, E14 marker vs assumptions consistency);
+- **10 additional WARN codes** (`W1`~`W10`): whole text too short, a requirement with no verifiable object, assumptions section empty, too many requirement/acceptance items, only 1 non-goal, one sentence carrying multiple requirements, fuzzy words in non-requirement sections, synonymous-heading binding ambiguity, a model name/version appearing while nothing in the text verifies or marks it unconfirmed (`W10`, a reminder only — never blocks delivery). `W8` is reported only in these two shapes: ① one numbered + one unnumbered; ② the section still has another candidate heading **at the same level** (both numbered or both unnumbered) — as long as a same-level candidate exists in the same section it warns, regardless of which one comes first. Binding prefers the heading that actually writes this section's entries; only after that does it consider whether it is numbered, whether the number is right, and document order, and it reports the other heading together with its line number; a `### 4.1 Requirement supplement` hanging under `## 4. Requirements (R#)` is a subheading (different level) and **does not count** as ambiguity. Among them, `W8` is only an **ambiguity warning**: fuzzy words in the requirements and acceptance sections are judged by "heading alias hit" (a hit is `E9`), so a wrong binding never silently downgrades an ERROR to a WARN; W8 says "this section's heading has two spellings fighting each other, fix one".
 
 **Gate ②: the skill's own definition**
 
@@ -190,7 +206,7 @@ It checks whether "automatic recognition" can hold:
 
 ```bash
 python scripts/check_contract.py <输出目录>/prompt.md
-python scripts/check_contract.py --selftest   # 49 cases + 2 --no-ignore cases + 1 line-number case + 2 scope-note cases + 2 cross-gate consistency cases + 1 performance case
+python scripts/check_contract.py --selftest   # 54 cases + 2 --no-ignore cases + 1 line-number case + 2 scope-note cases + 2 cross-gate consistency cases + 1 performance case
 ```
 
 Getting the sections themselves right (that is gate ①'s job) does not mean **the sections line up with each other**:
@@ -199,18 +215,29 @@ Getting the sections themselves right (that is gate ①'s job) does not mean **t
 - `C3` (ERROR) section 10 lists `未确认` (unconfirmed), while section 11 is empty or only says "none" — nobody covers the thing the user could not answer;
 - `C2` (WARN) some `R#` is not touched by any step in section 9 — nobody does that requirement;
 - `C4` (WARN) some `未确认` has no counterpart in section 11 (no shared keyword on either side);
-- `C5` (WARN) some acceptance item says `判定：命令` (verdict: command), but the item contains no command that can be pasted directly.
+- `C5` (WARN) some acceptance item says `判定：命令` (verdict: command), but the item contains no command that can be pasted directly;
+- `C6` (ERROR) the prompt contains `[NEEDS CLARIFICATION: …]`, but nothing in section 10 talks about **the same thing** (per-marker keyword match; one `未确认` anywhere is not enough).
 
 Writing-wise, just follow two rules: **every step in section 9 writes `（对应 R#）`** and **every `未确认` item in section 10 has a stop condition in section 11**.
+
+**Gate ④: 需求确认.md (the process record)**
+
+```bash
+python scripts/check_confirm.py <输出目录>/需求确认.md
+python scripts/check_confirm.py --selftest   # 56 cases + 2 --no-ignore cases + 1 template negative case
+```
+
+It checks the triage state, the five-step evidence chain (intake → research → define → shape → decide, each step needs an evidence word), the interview mode (menu / one-question-at-a-time), every question's method source (M id) and the `prompt.md` section it feeds: `D0`~`D10` are ERROR, `D11`/`D12` are WARN. It does not review prose quality; it makes sure the process record has no missing links.
+`templates/需求确认.md` is a **placeholder template**: submitting it with `<…>` left unreplaced is caught by gate ④ (CI has a dedicated template-negative step).
 
 **Exemption comments**: when a WARN truly does not need to be changed in this context, you can write `<!-- pf-ignore: W2 the quantification for this one is in the paired A# -->` **in the same section** — it applies only to WARNs, a reason is mandatory (too short a reason also reports `E11`), and a wrong code or malformed syntax also reports `E11`; `--no-ignore` shows every exempted item.
 Exemption is the exception, not the norm: the default is to fix it.
 
-**All three gates and that mutation test run in CI**
+**All four gates, the method library and that mutation test run in CI**
 
-In [`.github/workflows/ci.yml`](.github/workflows/ci.yml), everything runs on both Python 3.9 and 3.12 (three `--selftest` runs + `mutate_checks.py`), plus three repo-level checks: the repo's own assets (three positive examples, the prompt skeleton, `SKILL.md`) must pass the gates, negative examples must be caught, and repo text must be LF.
+In [`.github/workflows/ci.yml`](.github/workflows/ci.yml), everything runs on both Python 3.9 and 3.12 (five `--selftest` runs: four gates + `pick_methods.py`, then `mutate_checks.py`), plus three repo-level checks: the repo's own assets (three positive examples, the prompt skeleton, `SKILL.md`, the gate-④ positive example) must pass the gates, both negative examples (gate ① and gate ④) and the placeholder requirement-confirmation template must be caught, and repo text must be LF.
 
-**Delivery is allowed only with gates ① and ③ at 0 ERROR**; every WARN must be explained as not affecting execution.
+**Delivery is allowed only with gates ①, ③ and ④ at 0 ERROR**; every WARN must be explained as not affecting execution.
 Machines only check structure; whether the requirements are right still depends on the interview and human review — gates catch low-level mistakes, they are not a quality guarantee.
 
 ## Directory layout
@@ -222,15 +249,19 @@ prompt-forge/
 ├── CLAUDE.md            # makes Claude Code read AGENTS.md too
 ├── README.md
 ├── README.en.md         # English guide (cross-linked with README.md)
-├── .github/workflows/   # CI: three selftests + mutation test + three repo-level checks (assets pass gates / negative examples caught / all LF)
-├── references/          # requirement interview · reference example library · prompt structure · fuzzy-word conversion table · checklist · pitfall log · methodology sources
+├── CHANGELOG.md         # changelog
+├── .github/workflows/   # CI: four gates + method-library selftest + mutation test + repo-level checks (assets pass gates / two negative examples caught / all LF)
+├── references/          # requirement interview · interview-method mapping · reference example library · prompt structure · fuzzy-word conversion table · checklist · pitfall log · methodology sources
 ├── templates/           # prompt skeleton · requirement confirmation template
 ├── scripts/
 │   ├── check_prompt.py   # gate ①: checks the produced long prompt itself (includes --selftest)
 │   ├── check_skill.py    # gate ②: checks whether this skill's own definition can be auto-recognized (includes --selftest)
 │   ├── check_contract.py # gate ③: checks whether the 12 sections line up (includes --selftest)
+│   ├── check_confirm.py  # gate ④: checks the process-record fields in 需求确认.md (includes --selftest)
+│   ├── pick_methods.py   # interview method library CLI (--shape / --gaps / --risk / --json / --selftest)
 │   └── mutate_checks.py  # mutation test: corrupts the gate source; the selftest must go red
 ├── examples/            # positive and negative examples for gate ①: three positive + one negative (positives must pass the gate)
+│   ├── 需求确认/         # gate ④ fixtures: 1 positive and 1 negative
 │   └── 技能定义/         # positive and negative examples for gate ②: 1 positive and 8 negative, expected ERROR/WARN codes in that directory's README
 ├── 输出/                # output directory under clone usage (git-ignored)
 ```
@@ -238,14 +269,14 @@ prompt-forge/
 ## FAQ
 
 **Does it need network access?**
-No. Everything is local Markdown plus three zero-dependency Python scripts (`scripts/check_prompt.py`, `scripts/check_skill.py`, `scripts/check_contract.py`, Python ≥3.9); the network is only used in phase 1 pre-research to look things up.
+No. Everything is local Markdown plus five zero-dependency Python scripts (`scripts/check_prompt.py`, `scripts/check_skill.py`, `scripts/check_contract.py`, `scripts/check_confirm.py`, `scripts/pick_methods.py`, Python ≥3.9); the network is only used in phase 1 pre-research to look things up.
 `scripts/mutate_checks.py` only copies the repo to a temp directory, corrupts the gate source, and re-runs the selftest — also offline.
 
 **What if CI goes red?**
-Look at which step is red and fix each accordingly: three selftests red → the gate script itself has a bug, or examples/templates are stale;
+Look at which step is red and fix each accordingly: a selftest red → the gate script itself has a bug, or examples/templates are stale;
 `mutate_checks.py` red → one mutation was not caught by the selftest (meaning the selftest is decoration at that point; add a negative example before changing the code);
 "own assets must pass gates" red → a positive example / the prompt skeleton / `SKILL.md` in the repo has been edited into an ERROR;
-"negative examples must be caught" red → the gate missed it (`examples/反例-模糊需求.prompt.md` should not pass now), or the negative-example file was deleted or the gate script crashed — that step's `::error::` says which;
+"negative examples must be caught" red → the gate missed it (`examples/反例-模糊需求.prompt.md` for gate ① and the gate-④ negative example should not pass now), or the negative-example file was deleted or the gate script crashed — that step's `::error::` says which;
 LF check red → a file in the index was written with CRLF or mixed line endings (`git ls-files --eol`'s `i/` column, see `.gitattributes`; `references/踩坑记录.md` has several line-ending pitfalls).
 
 **Won't the prompt end up long and rambling?**
@@ -276,14 +307,16 @@ Yes. `AGENTS.md` is a general spec, `SKILL.md` is for tools that support Agent S
 
 Issues and PRs are welcome: new reference examples, new requirement-pattern question banks, new gate checks, or a pitfall you hit yourself (the format of `references/踩坑记录.md` is "symptom → cause → correct approach"; just write it that way).
 
-After changing `scripts/*.py`, `templates/`, `SKILL.md`, `AGENTS.md`, `references/`, or `examples/`, make sure the three selftests are still all green (after changing `SKILL.md`, `AGENTS.md`, or `references/`, also run `check_skill.py` on its own):
+After changing `scripts/*.py`, `templates/`, `SKILL.md`, `AGENTS.md`, `references/`, or `examples/`, make sure the five selftests are still all green (after changing `SKILL.md`, `AGENTS.md`, or `references/`, also run `check_skill.py` on its own):
 
 ```bash
 python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 python scripts/check_contract.py --selftest
+python scripts/check_confirm.py --selftest
+python scripts/pick_methods.py --selftest
 python scripts/check_skill.py SKILL.md   # run after changing SKILL.md / AGENTS.md / references/
-python scripts/mutate_checks.py     # must run if you touched the gate source: all 61 mutations must be caught
+python scripts/mutate_checks.py     # must run if you touched the gate source: all 78 mutations must be caught
 ```
 
 When adding a check, add a negative example and **first run it against a real file to confirm the expected ERROR code** — writing the expected value from intuition turns the selftest into an "always passes" decoration; then add the key line of the new check to `MUTATIONS` in `scripts/mutate_checks.py`, so that "the selftest got blinded" also goes red. CI runs all of these for you (both Python 3.9 and 3.12).
@@ -297,6 +330,8 @@ Expand-Archive python-3.9.13-embed-amd64.zip -DestinationPath py39
 & .\py39\python.exe -X utf8 -B scripts\check_prompt.py --selftest
 & .\py39\python.exe -X utf8 -B scripts\check_skill.py --selftest
 & .\py39\python.exe -X utf8 -B scripts\check_contract.py --selftest
+& .\py39\python.exe -X utf8 -B scripts\check_confirm.py --selftest
+& .\py39\python.exe -X utf8 -B scripts\pick_methods.py --selftest
 & .\py39\python.exe -X utf8 -B scripts\mutate_checks.py
 ```
 
@@ -313,6 +348,8 @@ sudo apt-get update && sudo apt-get install -y python3.9
 python3.9 -X utf8 -B scripts/check_prompt.py --selftest
 python3.9 -X utf8 -B scripts/check_skill.py --selftest
 python3.9 -X utf8 -B scripts/check_contract.py --selftest
+python3.9 -X utf8 -B scripts/check_confirm.py --selftest
+python3.9 -X utf8 -B scripts/pick_methods.py --selftest
 python3.9 -X utf8 -B scripts/mutate_checks.py
 ```
 

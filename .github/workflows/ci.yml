@@ -1,6 +1,6 @@
 name: 闸门
 
-# 三道闸门的自测 + 仓库自家资产实跑 + 变异检验。
+# 四道闸门的自测 + 仓库自家资产实跑 + 变异检验。
 # 最要紧的是「变异检验」那一步：把闸门源码里某一行改坏，如果自测还是全绿，说明那些自测是空跑的
 # （踩坑记录 #29），这时整个工作流必须失败 —— 光跑自测证明不了自测在看着代码。
 on:
@@ -33,11 +33,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: 三个闸门的自测
+      - name: 四个闸门与问询方法库的自测
         run: |
           python -X utf8 -B scripts/check_prompt.py --selftest
           python -X utf8 -B scripts/check_skill.py --selftest
           python -X utf8 -B scripts/check_contract.py --selftest
+          python -X utf8 -B scripts/check_confirm.py --selftest
+          python -X utf8 -B scripts/pick_methods.py --selftest
 
       - name: 变异检验（把闸门改坏，自测必须变红）
         run: python -X utf8 -B scripts/mutate_checks.py
@@ -55,6 +57,7 @@ jobs:
             "examples/例3-logsift-json-export.prompt.md" \
             "templates/提示词骨架.md"
           python -X utf8 -B scripts/check_skill.py SKILL.md
+          python -X utf8 -B scripts/check_confirm.py "examples/需求确认/例1-下载文件夹整理.需求确认.md"
 
       - name: 反例必须被拦下（非零退出且输出里真的报 ERROR）
         run: |
@@ -73,6 +76,48 @@ jobs:
           echo "$out"
           if ! printf '%s\n' "$out" | grep -q 'ERROR'; then
             echo "::error::反例退出码 $rc，但输出里一条 ERROR 都没有 —— 不是闸门① 判红的（文件缺失/脚本崩溃？）"
+            exit 1
+          fi
+
+      - name: 需求确认反例必须被拦下（非零退出且输出里真的报 ERROR）
+        run: |
+          ref="examples/需求确认/反例-需求确认缺证据链.需求确认.md"
+          if [ ! -f "$ref" ]; then
+            echo "::error::$ref 不存在 —— 这一步没法证明闸门④ 在拦东西"
+            exit 1
+          fi
+          if out=$(python -X utf8 -B scripts/check_confirm.py "$ref" 2>&1); then
+            echo "$out"
+            echo "::error::反例-需求确认缺证据链 竟然 0 ERROR 通过 —— 闸门④ 漏了"
+            exit 1
+          else
+            rc=$?
+          fi
+          echo "$out"
+          if ! printf '%s\n' "$out" | grep -q 'ERROR'; then
+            echo "::error::反例退出码 $rc，但输出里一条 ERROR 都没有 —— 不是闸门④ 判红的（文件缺失/脚本崩溃？）"
+            exit 1
+          fi
+
+      - name: 占位模板必须被闸门④ 拦下（原样提交不能空跑过闸门）
+        run: |
+          # 独立验证 F1：旧版 `_clean()` 会剥掉 `<…>`，导致模板什么都不填也是 0 ERROR。
+          # 模板的作用是「照着填」，能空跑过闸门等于告诉用户「不填也行」。
+          ref="templates/需求确认.md"
+          if [ ! -f "$ref" ]; then
+            echo "::error::$ref 不存在 —— 这一步没法证明占位模板会被拦"
+            exit 1
+          fi
+          if out=$(python -X utf8 -B scripts/check_confirm.py "$ref" 2>&1); then
+            echo "$out"
+            echo "::error::占位模板竟然 0 ERROR 通过 —— 闸门④ 把 <…> 当成有效值了"
+            exit 1
+          else
+            rc=$?
+          fi
+          echo "$out"
+          if ! printf '%s\n' "$out" | grep -q 'ERROR'; then
+            echo "::error::占位模板退出码 $rc，但输出里一条 ERROR 都没有 —— 不是闸门④ 判红的（文件缺失/脚本崩溃？）"
             exit 1
           fi
 

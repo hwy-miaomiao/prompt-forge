@@ -419,6 +419,100 @@ MUTATIONS: list[Mutation] = [
         '                   "可以不选", "不选也行", "不用选", "也可以不选", "可跳过"]',
         'OPT_OUT_MARKERS = ["都可以", "你决定", "全按默认", "按默认走"]',
     ),
+    # ---- task-6 融合：新增检查各自留一处变异 ----
+    Mutation(
+        "E12 先自证再汇报不再检查（没自证也放行）", "check_prompt.py",
+        "        if not any(word in body for word in SELF_PROOF_WORDS) or SELF_PROOF_NEGATION_RE.search(body):",
+        "        if False:",
+    ),
+    Mutation(
+        "E13 标记格式退回只要前缀就算对", "check_prompt.py",
+        "            valid = NEEDS_CLARIFICATION_RE.match(tail)",
+        "            valid = NEEDS_CLARIFICATION_PREFIX_RE.match(tail)",
+    ),
+    Mutation(
+        "E14 标记与假设段不再对账（自相矛盾也放行）", "check_prompt.py",
+        "    if markers:",
+        "    if False:",
+    ),
+    Mutation(
+        "W10 模型名无核验不再提示", "check_prompt.py",
+        "    if model_hit is not None and not any(word in raw for word in MODEL_VERIFIED_WORDS):",
+        "    if False:",
+    ),
+    Mutation(
+        "C6 标记与第 10 段不再对账（说得不是一回事也放行）", "check_contract.py",
+        "        if known and words & known:",
+        "        if known:",
+    ),
+    Mutation(
+        "D1 非法问询模式也归成菜单式", "check_confirm.py",
+        '    if "菜单式" in text or text == "菜单":\n'
+        '        return "菜单式"\n'
+        "    return None",
+        '    if "菜单式" in text or text == "菜单":\n'
+        '        return "菜单式"\n'
+        '    return "菜单式"',
+    ),
+    Mutation(
+        "D2 分诊不在三态里也归成 go", "check_confirm.py",
+        '    if re.search(r"(?:^|[（(\\s])go(?:[）)\\s]|$)", low) or text.startswith("接") or "接（" in text:\n'
+        '        return "go"\n'
+        "    return None",
+        '    if re.search(r"(?:^|[（(\\s])go(?:[）)\\s]|$)", low) or text.startswith("接") or "接（" in text:\n'
+        '        return "go"\n'
+        '    return "go"',
+    ),
+    Mutation(
+        "D4 证据链缺步骤不再报", "check_confirm.py",
+        "        if missing:",
+        "        if False:",
+    ),
+    Mutation(
+        "D5 证据链没写有效证据也放行", "check_confirm.py",
+        "            elif not _evidence_ok(clean):",
+        "            elif False:",
+    ),
+    Mutation(
+        "D6 kill 不写理由也放行", "check_confirm.py",
+        '        if triage == "kill" and decide_text and not KILL_REASON_RE.search(decide_text):',
+        "        if False:",
+    ),
+    Mutation(
+        "D7 空白答案当成默认值", "check_confirm.py",
+        "                    if idx_answer is not None and (not answer or _is_placeholder(answer)):",
+        "                    if False:",
+    ),
+    Mutation(
+        "D10 未确认不逐条对账也放行", "check_confirm.py",
+        "                        for line_no, question in _unmatched_pending(pending, body4):",
+        "                        for line_no, question in []:",
+    ),
+    Mutation(
+        "D3 一句理由随便写也放行", "check_confirm.py",
+        "            if _is_placeholder(reason) or len(reason) < 8:",
+        "            if False:",
+    ),
+    Mutation(
+        "D8 方法来源不在方法库也放行", "check_confirm.py",
+        "                        if not _valid_method(method):",
+        "                        if False:",
+    ),
+    Mutation(
+        "D9 追溯不可解析也放行", "check_confirm.py",
+        "                        if not _valid_trace(trace):",
+        "                        if False:",
+    ),
+    Mutation(
+        "D11 超过 9 题不再提示", "check_confirm.py",
+        "                if len(data_rows) > 9:",
+        "                if False:",
+    ),
+    Mutation(
+        "D12 needs-clarification 不写缺什么也放行", "check_confirm.py",
+        '    if triage == "needs-clarification" and not NEEDS_REASON_RE.search(decide_text):',
+        "    if False:",
+    ),
 ]
 
 

@@ -75,12 +75,73 @@ _TOKEN_EXT_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,7}")
 #: （64KB 的 `<!--` 要 7.9 秒、1MB 直接卡死，审计 R6-gate1-02）。
 #: 注释内容：`pf-ignore: W2 理由`；理由可以折行，解析时拼成一句。
 IGNORE_RE = re.compile(r"^\s*pf-ignore\s*[:：]\s*(.*)$", re.S)
-IGNORE_CODES = tuple(f"W{i}" for i in range(1, 10))
+IGNORE_CODES = tuple(f"W{i}" for i in range(1, 11))
 #: ERROR 码表同时是「pf-ignore 不能豁免谁」的判据：漏一个码，写 `pf-ignore: E11` 就会掉进
 #: 「不认识这个码」分支，得到一句与事实不符的提示（审计 P19）。
-ERROR_CODES = ("E0", "E1", "E2", "E2b", "E3", "E3b", "E4", "E5", "E6", "E7", "E8", "E9", "E10", "E11")
+ERROR_CODES = ("E0", "E1", "E2", "E2b", "E3", "E3b", "E4", "E5", "E6", "E7", "E8", "E9", "E10",
+               "E11", "E12", "E13", "E14")
 #: 理由至少几个字：写「误报」算说了，写「-」「ok」不算。
 IGNORE_REASON_MIN = 4
+
+#: 第 12 段必须交代「先自证再汇报」：写了 A# 不通过不许说已完成，但没说汇报前要自己先验一遍。
+#: verification-before-completion 的本地化口径；关键词宁可宽一点，别把同义写法误判成没写。
+SELF_PROOF_WORDS = (
+    "自证", "先自己验", "先自验", "自己先验", "先验证再汇报", "先跑一遍再汇报",
+    "先自测", "先自查", "先验一遍", "自己先跑", "先跑再汇报", "自验",
+)
+#: spec-kit 的显式未决标记：`[NEEDS CLARIFICATION: 缺什么]`。冒号、内容都必须是写实的，
+#: 只写一个方括号标签等于把「没想清楚」藏起来（E13）。内容单独成组，好在 E14 里逐条对账。
+NEEDS_CLARIFICATION_RE = re.compile(r"\[NEEDS CLARIFICATION:\s*([^\]\n]*?)\s*\]")
+NEEDS_CLARIFICATION_PREFIX_RE = re.compile(r"\[NEEDS CLARIFICATION")
+#: 「不需要/无需/跳过 + 自证」这类否定句不算自证（独立验证 F5）；
+#: 不匹配「没有自证不许说已完成」——那里「没有」是条件，不是豁免。
+SELF_PROOF_NEGATION_RE = re.compile(
+    r"(?:不需要|无需|不必|不用|跳过|省去|不做|免了)\s*(?:做|再|先)?\s*(?:自证|自验|自查|自测|验证)"
+)
+#: 具体模型名 / 版本号：只认「名字 + 数字版本」这种强信号，避免把 `Claude Code` 这类工具名、
+#: `Python 3.12` 这类语言版本错当成模型（W10 是保守提示，不进 ERROR）。
+MODEL_VERSION_RE = re.compile(
+    r"(?:GPT-[0-9](?:\.[0-9])?(?:-[A-Za-z]+)?"
+    r"|GPT-4o"
+    r"|Claude[- ](?:3|3\.[0-9]|4|4\.[0-9]|4o|Opus|Sonnet|Haiku)"
+    r"|Gemini[- ](?:1\.[0-9]|2(?:\.[0-9])?)"
+    r"|Llama[- ]?(?:2|3)(?:\.[0-9])?"
+    r"|Qwen[- ]?(?:2|2\.5|3)(?:\.[0-9])?"
+    r"|DeepSeek[- ]?V?[0-9](?:\.[0-9])?"
+    r"|Mistral[- ]?(?:7B|8x7B|Large|Medium|Small)"
+    r"|Grok[- ]?[0-9])",
+    re.IGNORECASE,
+)
+#: 出现模型名时，这些词算「核验过 / 标了未确认」：有一个就不报 W10。
+MODEL_VERIFIED_WORDS = ("未确认", "NEEDS CLARIFICATION", "官方文档", "官方文档核对", "核验", "已查文档")
+
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+_ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_]{2,}")
+
+
+def content_tokens(text: str) -> set[str]:
+    """逐条对账用的词：英文单词 + 中文二元组（与闸门③ 的 keywords() 同口径）。"""
+    tokens = {word.lower() for word in _ASCII_WORD_RE.findall(text)}
+    for run in _CJK_RUN_RE.findall(text):
+        tokens.update(run[i:i + 2] for i in range(len(run) - 1))
+    return tokens
+
+
+#: 逐条对账时的通用词：两边都会出现，但不能证明「在说同一件事」（第二轮 R2-F2）。
+#: 例如「是否需要」的 是否 / 否需 / 需要 会让「离线部署是否需要单独说明」和
+#: 「是否需要每天自动运行」被误判成对得上 —— 去掉通用词后只剩实词才算命中。
+GENERIC_TOKENS = {
+    "是否", "否需", "需要", "要需", "什么", "怎么", "如何", "哪些", "哪个", "多少",
+    "能否", "可否", "可以", "应该", "会不会", "是不", "不是", "要不", "要么",
+    "现在", "目前", "这个", "那个", "这里", "那里", "还是", "以及", "或者",
+    "因为", "所以", "如果", "那么", "但是", "而且", "并且", "然后", "同时",
+    "默认", "假设", "问题", "情况", "一条", "两条", "用户", "需求", "说明",
+    "确认", "未确", "信息", "内容", "时候", "以后", "之前", "之后", "一样",
+    "具体", "相关", "以下", "上面", "下面", "进行", "支持", "使用", "清楚",
+    "每天", "一次", "自动", "运行", "已经", "还有", "没有", "我们", "你们",
+    "他们", "自己", "知道", "觉得", "希望", "要求", "方式", "方法", "地方",
+}
+
 
 
 def codes_hint(codes: tuple[str, ...]) -> str:
@@ -1084,6 +1145,73 @@ def check_file(path: Path, use_ignore: bool = True,
         if token is not None:
             findings.append(Finding("ERROR", "E10", f"残留占位符 `{token}`", idx))
 
+    # ---- E12 汇报格式：先自证再汇报 ----------------------------------------
+    # verification-before-completion 的落点：不是「怎么验的」这几个字，而是「汇报之前自己先跑一遍」。
+    # 这条是 ERROR：没有自证就汇报，等于把验证成本推给用户（task-6 D 项的口径）。
+    report_label = "12 汇报格式"
+    if report_label in matched:
+        start, end = matched[report_label]
+        body = body_of(lines, start, end)
+        # 「不需要先自证」这种否定句不算写了自证（独立验证 F5）。
+        if not any(word in body for word in SELF_PROOF_WORDS) or SELF_PROOF_NEGATION_RE.search(body):
+            findings.append(Finding(
+                "ERROR", "E12",
+                "第 12 段汇报格式没写「先自证再汇报」：要求执行者汇报前自己按第 8 段跑一遍、"
+                "贴输出，再说做完了（A# 不通过的汇报一律不算完成）",
+                start + 1,
+            ))
+
+    # ---- E13/E14 显式未决标记 ----------------------------------------------
+    # `[NEEDS CLARIFICATION: ...]` 是 spec-kit 的显式不确定写法：有它就不许再猜；
+    # 但只写一个标签、或写完却不进第 10 段假设，等于把「没想清楚」藏起来。
+    markers: list[tuple[int, str]] = []
+    for idx, line in enumerate(lines):
+        if fenced[idx] or indented[idx]:
+            continue
+        for match in NEEDS_CLARIFICATION_PREFIX_RE.finditer(line):
+            tail = line[match.start():]
+            valid = NEEDS_CLARIFICATION_RE.match(tail)
+            # 内容全空白算格式错（独立验证 F4）：`[NEEDS CLARIFICATION:   ]` 曾能过。
+            content = valid.group(1).strip() if (valid and valid.groups()) else ""
+            if valid and len(content) >= 2:
+                markers.append((idx + 1, content))
+                break
+            findings.append(Finding(
+                "ERROR", "E13",
+                "显式未决标记格式不对：应写成 `[NEEDS CLARIFICATION: 具体缺什么（一句话）]`，"
+                "冒号后不能为空、不能跨行、不能用 `]` 截断",
+                idx + 1,
+            ))
+            break
+    assume_label = "10 假设与开放问题"
+    if markers:
+        body10 = body_of(lines, *matched[assume_label]) if assume_label in matched else ""
+        body10_tokens = content_tokens(body10) - GENERIC_TOKENS
+        has_unconfirmed = bool(re.search(
+            r"未确认(?!\s*[:：]?\s*(?:无|没有|暂无|0|零|不适用|n/?a))", body10, re.IGNORECASE))
+        if not has_unconfirmed:
+            findings.append(Finding(
+                "ERROR", "E14",
+                f"用了 {len(markers)} 处 `[NEEDS CLARIFICATION: ...]` 标未决信息，"
+                "但第 10 段没有对应的「未确认」条目 —— 标记和假设段自相矛盾，执行者会直接猜",
+                markers[0][0],
+            ))
+        else:
+            # 逐条对账（独立验证 F10）：有一条无关的未确认，不等于每处标记都有人接。
+            # 通用词不算对得上（第二轮 R2-F2）：去掉「是否/需要」这类词后再比实词。
+            for line_no, content in markers:
+                tokens = content_tokens(content) - GENERIC_TOKENS
+                if not tokens:
+                    continue  # 全是口水词，判断不了，不冒充判断
+                if tokens & body10_tokens:
+                    continue
+                findings.append(Finding(
+                    "ERROR", "E14",
+                    f"`[NEEDS CLARIFICATION: {content}]` 在第 10 段找不到说同一件事的「未确认」条目 ——"
+                    "标记和假设段自相矛盾，执行者会直接猜",
+                    line_no,
+                ))
+
     # ---- 其余警告 ----------------------------------------------------------
     # 行号不是装饰：`pf-ignore` 的作用域按「注释与被豁免的 WARN 在同一段」判，
     # 所以这几条也得说清自己在哪一段（拿段落标题行当锚点）。
@@ -1132,6 +1260,25 @@ def check_file(path: Path, use_ignore: bool = True,
         if is_empty_claim(body_of(lines, start, end)):
             findings.append(Finding("WARN", "W3", "假设段为空；一条假设都没有，通常说明替用户拍板了",
                                     start + 1))
+
+    # ---- W10 模型名 / 版本号的保守提示 --------------------------------------
+    # 这是跨切面的保守检查（不是所有提示词都涉及模型）：只有出现「名字 + 数字版本」这种强信号、
+    # 且全文既没写未确认、也没有核验说明时才提示。宁可漏报，不误伤工具名与语言版本。
+    model_hit: tuple[int, str] | None = None
+    for idx, line in enumerate(lines):
+        if fenced[idx] or indented[idx]:
+            continue
+        match = MODEL_VERSION_RE.search(line)
+        if match:
+            model_hit = (idx + 1, match.group(0))
+            break
+    if model_hit is not None and not any(word in raw for word in MODEL_VERIFIED_WORDS):
+        findings.append(Finding(
+            "WARN", "W10",
+            f"出现具体模型名 / 版本「{model_hit[1]}」，但全文没有核验说明、也没标「未确认」——"
+            "第 6 段要求：模型名、版本号、API 默认值必须核官方文档，查不到就写未确认",
+            model_hit[0],
+        ))
 
     if use_ignore and ignores:
         findings, dropped = apply_ignores(findings, ignores, where)
@@ -1374,6 +1521,8 @@ python scripts/borrow.py
 - 表头不在第 1 行时，停下来问人再确认列名。
 
 ## 12. 汇报格式
+汇报前先自证：按第 8 段命令自己跑一遍并贴出输出，再汇报。
+
 1. 改了什么（文件清单）
 2. 怎么验的（贴命令与输出）
 """
@@ -1893,6 +2042,87 @@ def selftest() -> int:
                      "## 4. 需求（R#）",
                      "## 4. 需求（R#）\n\n<!-- pf-ignore: W6 这版先不补第二条 -->"),
          set(), {"W6"}, "", set()),
+        # ---- task-6 融合：先自证再汇报 / 显式未决标记 / 模型名保守提示 ----------
+        # E12：第 12 段只写「怎么验的」，没要求「汇报前自己先跑一遍」，等于把验证成本推给用户。
+        ("E12 第 12 段没写先自证",
+         lambda: sub(from_clean(),
+                     "汇报前先自证：按第 8 段命令自己跑一遍并贴出输出，再汇报。\n\n", ""),
+         {"E12"}),
+        # 对照：换成同义写法也要认（关键词宁可宽一点，别误伤「自己先验一遍」这种表达）。
+        ("E12 同义写法先自己验一遍",
+         lambda: sub(from_clean(),
+                     "汇报前先自证：按第 8 段命令自己跑一遍并贴出输出，再汇报。",
+                     "汇报格式：先自己验一遍，再汇报。"),
+         set()),
+        # F5（独立验证）：否定句「不需要先自证」不算写了自证。
+        ("F5 第 12 段写「不需要先自证」",
+         lambda: sub(from_clean(),
+                     "汇报前先自证：按第 8 段命令自己跑一遍并贴出输出，再汇报。",
+                     "汇报格式：汇报前不需要先自证。"),
+         {"E12"}),
+        # E13：只有标签、没有冒号和内容 —— 标了未决却没说缺什么，执行者还是要猜。
+        ("E13 标记缺冒号与内容",
+         lambda: sub(from_clean(), "## 6. 技术约束",
+                     "## 6. 技术约束\n- 目标模型：[NEEDS CLARIFICATION]"),
+         {"E13"}),
+        ("E13 标记内容为空",
+         lambda: sub(from_clean(), "## 6. 技术约束",
+                     "## 6. 技术约束\n- 目标模型：[NEEDS CLARIFICATION: ]"),
+         {"E13"}),
+        # F4（独立验证）：内容全是空格也要拦，不能因为「有 2 个字符」就放过。
+        ("F4 标记内容只有空格",
+         lambda: sub(from_clean(), "## 6. 技术约束",
+                     "## 6. 技术约束\n- 目标模型：[NEEDS CLARIFICATION:    ]"),
+         {"E13"}),
+        # E14：标记写对了，却没进第 10 段的「未确认」——标记与假设段自相矛盾。
+        ("E14 标记未进假设段",
+         lambda: sub(sub(from_clean(),
+                         "（未确认：若表头在第 2 行要改 header 参数）", ""),
+                     "## 6. 技术约束",
+                     "## 6. 技术约束\n- 目标模型：[NEEDS CLARIFICATION: 目标模型与版本是什么？]"),
+         {"E14"}),
+        # 对照：标记 + 第 10 段未确认都在，才算自洽（标记要说得上同一件事，见 F10 用例）。
+        ("E14 标记与未确认条目对应",
+         lambda: sub(from_clean(), "## 6. 技术约束",
+                     "## 6. 技术约束\n- 目标模型：[NEEDS CLARIFICATION: 表头在第几行？]"),
+         set()),
+        # F10（独立验证）：两处标记里只有一处对得上，另一处不能靠「有一条无关未确认」蒙混。
+        ("F10 两处标记只有一处对得上",
+         lambda: sub(from_clean(), "## 6. 技术约束",
+                     "## 6. 技术约束\n"
+                     "- 目标模型：[NEEDS CLARIFICATION: 目标模型与版本是什么？]\n"
+                     "- 部署环境：[NEEDS CLARIFICATION: 表头在第几行？]"),
+         {"E14"}),
+        # R2-F2（第二轮独立验证）：只共享「是否/需要」这类通用词不算对得上，实词不同照样 ERROR。
+        ("R2-F2 标记与未确认只共享通用词",
+         lambda: sub(sub(sub(from_clean(),
+                             "（未确认：若表头在第 2 行要改 header 参数）",
+                             "（未确认：是否需要每天自动运行）"),
+                         "- 需要新增第三方依赖时，停下来问人。",
+                         "- 需要每天自动运行时，停下来问人确认频率。"),
+                     "## 6. 技术约束",
+                     "## 6. 技术约束\n"
+                     "- 部署环境：[NEEDS CLARIFICATION: 离线部署是否需要单独说明]"),
+         {"E14"}),
+        # W10：出现具体模型名+版本、全文又没有任何核验/未确认说明 —— 保守提示，不进 ERROR。
+        ("W10 模型名无核验说明",
+         lambda: sub(sub(from_clean(),
+                         "（未确认：若表头在第 2 行要改 header 参数）", ""),
+                     "## 6. 技术约束",
+                     "## 6. 技术约束\n- 目标模型：GPT-4o。"),
+         set(), {"W10"}),
+        # 对照：写了核验来源就不提示。
+        ("W10 写了已查官方文档则通过",
+         lambda: sub(sub(from_clean(),
+                         "（未确认：若表头在第 2 行要改 header 参数）", ""),
+                     "## 6. 技术约束",
+                     "## 6. 技术约束\n- 目标模型：GPT-4o（已查官方文档核对）。"),
+         set(), set()),
+        # 保守性：工具名（Claude Code）和语言版本（Python 3.12）不是模型名，不许误伤。
+        ("W10 不误伤工具名与语言版本",
+         lambda: sub(from_clean(), "## 6. 技术约束",
+                     "## 6. 技术约束\n- 执行工具：Claude Code；语言：Python 3.12。"),
+         set(), set()),
     ]
     for case in inline:
         name, build, want = case[0], case[1], case[2]

@@ -18,6 +18,7 @@
   C3 ERROR  第 10 段有「未确认」，第 11 段却空着或只写「无」
   C4 WARN   那条「未确认」在第 11 段找不到对应（两边没有一个共同关键词）
   C5 WARN   `判定：命令` 却没给出可直接粘贴的命令
+  C6 ERROR  `[NEEDS CLARIFICATION: …]` 标了缺什么，第 10 段的「未确认」却没有说同一件事的那条
 
 实现口径（四条，写下来免得以后自己猜）：
   * **解析器只有一份**：全部 import 闸门①（`check_prompt`），不复制正则与拆段逻辑。
@@ -53,10 +54,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_prompt as cp  # noqa: E402  （同目录，故意复用闸门① 的解析器）
 
-#: 本闸门自己的码（C1/C3 是 ERROR，其余是 WARN）。
-C_CODES = ("C1", "C2", "C3", "C4", "C5")
+#: 本闸门自己的码（C1/C3/C6 是 ERROR，其余是 WARN）。
+C_CODES = ("C1", "C2", "C3", "C4", "C5", "C6")
 #: 本闸门的码里哪些是 ERROR：`pf-ignore` 不能豁免它们（写进注释会报 E11，审计 P32）。
-C_ERROR_CODES = ("C1", "C3")
+C_ERROR_CODES = ("C1", "C3", "C6")
 #: 能被 `pf-ignore` 豁免的 C 码（WARN）。
 C_WARN_CODES = ("C2", "C4", "C5")
 #: 纸张规格后缀：`A4 纸` / `A3 幅面` / `A0/A1 幅面` / `A2 出图` 里的编号不是验收编号（审计 P25）。
@@ -344,6 +345,8 @@ _DENY_UNCONFIRMED_POST_RE = re.compile(
 )
 #: 「待确认：…」是「未确认：…」的同义写法（第 6 轮审计 R6-PF-G3-03 一并归一，免得换个词就假绿）。
 _PENDING_ALIAS_RE = re.compile(r"待确认(?=\s*(?:[:：]|项|条|点))")
+#: 显式未决标记（spec-kit 的写法）：`[NEEDS CLARIFICATION: 缺什么]`。C6 用它查「标记与假设段对不对得上」。
+_NEEDS_MARKER_RE = re.compile(r"\[NEEDS CLARIFICATION:\s*([^\]\n]*\S[^\]\n]*)\]")
 
 
 def _mentions_unconfirmed(text: str) -> bool:
@@ -450,6 +453,53 @@ def check_open_items(
     return findings
 
 
+def check_markers(
+    lines: list[str], fenced: list[bool], indented: list[bool],
+    sections: list[tuple[str, int, int, int, bool]]
+) -> list[cp.Finding]:
+    """C6：`[NEEDS CLARIFICATION: …]` 标了缺什么，第 10 段就得有说同一件事的「未确认」。
+
+    闸门① 只查标记**自身**（E13 查格式、E14 逐条查关键词对账）；这里查**跨文件视角的对账**：
+    标记说「缺 A」，第 10 段的未确认却全在说 B —— 执行者读到标记会停下来，停下来才发现
+    没人告诉他这条缺的信息记在哪。两条一边是同一个文件的第 6 段，一边是第 10 段，
+    对不上就不是「某一段写错了」，所以放在闸门③。独立验证 F10 把这档从 WARN 升成 ERROR：
+    标记是对执行者的硬停指令，配不上号比「可能没落脚点」严重。
+    """
+    sec10 = find_section(sections, 10)
+    body10 = ""
+    if sec10 is not None:
+        body10 = "\n".join(
+            cp.strip_comments(lines[i])
+            for i in range(sec10[0] + 1, min(sec10[1], len(lines)))
+            if not fenced[i] and not indented[i]
+        )
+    known = keywords(body10) - cp.GENERIC_TOKENS
+    markers: list[tuple[int, str]] = []
+    for idx, line in enumerate(lines):
+        if fenced[idx] or indented[idx]:
+            continue
+        if sec10 is not None and sec10[0] < idx < min(sec10[1], len(lines)):
+            continue  # 第 10 段里的标记是「记录」，不是「引用」
+        clean = cp.strip_comments(line)
+        for match in _NEEDS_MARKER_RE.finditer(clean):
+            markers.append((idx + 1, match.group(1).strip()))
+    findings: list[cp.Finding] = []
+    for line_no, content in markers:
+        # 通用词不算对得上（第二轮 R2-F2）：去掉「是否/需要」这类词后再比实词。
+        words = keywords(content) - cp.GENERIC_TOKENS
+        if not words:
+            continue  # 太短 / 全是口水词，判断不了，不冒充判断
+        if known and words & known:
+            continue
+        findings.append(cp.Finding(
+            "ERROR", "C6",
+            f"`[NEEDS CLARIFICATION: {content}]` 在第 10 段找不到说同一件事的「未确认」："
+            "标记与假设段说的不是同一件事，用户答不上来时不知道该补哪条",
+            line_no,
+        ))
+    return findings
+
+
 def _code_span_is_command(span: str) -> bool:
     """反引号片段像不像一条能直接粘贴的命令（第 5 轮独立复验 N1）。"""
     body = span.strip("`").strip()
@@ -529,6 +579,7 @@ def check_contract(
     findings.extend(check_refs(lines, fenced, indented, known))
     findings.extend(check_step_coverage(lines, fenced, indented, sections, known["R"]))
     findings.extend(check_open_items(lines, fenced, indented, sections))
+    findings.extend(check_markers(lines, fenced, indented, sections))
     findings.extend(check_judgements(lines, fenced, acceptances))
 
     # 豁免注释无论 --no-ignore 都要解析：写错的豁免（给 ERROR 码、码不认识、理由太短）
@@ -820,6 +871,35 @@ def selftest() -> int:
          lambda: sub(sub(base, "## 9. 执行步骤", "## 9. 执\u200b行步骤"),
                      step2, step2.replace("（对应 R2）", "")),
          set(), {"C2"}, set(), ""),
+        # —— task-6 融合 B：`[NEEDS CLARIFICATION: ...]` 与第 10 段「未确认」要说得上同一件事 ——
+        ("C6 标记与第 10 段说的不是同一件事",
+         lambda: sub(base, "## 6. 技术约束",
+                     "## 6. 技术约束\n- 数据库版本：[NEEDS CLARIFICATION: 数据库用哪个版本？]"),
+         {"C6"}, set(), set(), ""),
+        ("C6 标记与未确认条目对得上就不报",
+         lambda: sub(base, "## 6. 技术约束",
+                     "## 6. 技术约束\n- 表头行数：[NEEDS CLARIFICATION: 表头在第几行？]"),
+         set(), set(), set(), ""),
+        ("C6 第 10 段里的标记是记录，不算引用",
+         lambda: sub(base,
+                     "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                     "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。"
+                     "\n  数据库版本：[NEEDS CLARIFICATION: 数据库用哪个版本？]"),
+         set(), set(), set(), ""),
+        ("C6 围栏代码块里的标记不算引用",
+         lambda: sub(base, "## 6. 技术约束",
+                     "## 6. 技术约束\n\n```text\n数据库版本：[NEEDS CLARIFICATION: 数据库用哪个版本？]\n```"),
+         set(), set(), set(), ""),
+        # R2-F2（第二轮独立验证）：只共享「是否/需要」这类通用词不算对得上。
+        ("R2-F2 标记与未确认只共享通用词",
+         lambda: sub(sub(sub(base,
+                             "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
+                             "- 假设每天跑一次（未确认：是否需要每天自动运行）。"),
+                         "- 需要新增第三方依赖时，停下来问人。",
+                         "- 需要每天自动运行时，停下来问人确认频率。"),
+                     "## 6. 技术约束",
+                     "## 6. 技术约束\n- 部署环境：[NEEDS CLARIFICATION: 离线部署是否需要单独说明]"),
+         {"C6"}, set(), set(), ""),
     ]
 
     failed = 0
