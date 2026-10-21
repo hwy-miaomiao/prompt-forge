@@ -1005,9 +1005,24 @@ def check_file(path: Path, use_ignore: bool = True,
         body = body_of(lines, start, end)
         if is_empty_claim(body):
             findings.append(Finding("ERROR", "E7", "非目标段落为空或只写了「无」；至少写 1 条不做的事"))
-        elif len([ln for ln in split_lines(body) if ln.strip() and not ln.strip().startswith("|")]) < 2 \
-                and len([ln for ln in split_lines(body) if ln.strip()]) < 2:
-            findings.append(Finding("WARN", "W6", "非目标只写了 1 条，建议补到 2 条以上"))
+        else:
+            # W6 数的是「条数」，不是「行数」：1 条非目标后面跟一行续行说明，或者写成
+            # 单列表格（表头 + 分隔行 + 1 条数据），都仍然只写了 1 条。旧判据等价于
+            # 「§5 总共只有 1 行非空」，上面两种写法都会漏报（第 8 轮审计 R8-03）。
+            body_lines = [ln for ln in split_lines(body) if ln.strip()]
+            bullets = [ln for ln in body_lines
+                       if re.match(r"^\s*(?:[-*+]|\d+[.)])\s+\S", ln)]
+            table_rows = [ln for ln in body_lines if ln.strip().startswith("|")]
+            if bullets or table_rows:
+                # 表格前两行是表头与分隔行，剩下的才算条目。
+                data_rows = table_rows[2:] if len(table_rows) >= 2 else []
+                count = len(bullets) + len(data_rows)
+            else:
+                count = len(body_lines)
+            if count < 2:
+                # 带行号 = 豁免注释只在 §5 内生效（无行号会被当成文件级，别的段写注释也能压掉）。
+                findings.append(Finding(
+                    "WARN", "W6", "非目标只写了 1 条，建议补到 2 条以上", start + 1))
 
     # ---- E8 交付物路径 -----------------------------------------------------
     deliv_label = "3 交付物"
@@ -1420,6 +1435,10 @@ def selftest() -> int:
     plain_r3_new = "- **R3** 界面要顺手。"
     #: 夹具里那条完整、合法的 A3：「判定」写法相关的用例都在这条上做替换。
     a3_line = "- **A3（对应 R3）** 入口与退出码符合要求。判定：人工 看 main 分支。"
+    #: §5 原始的两条非目标（夹具锚点），以及「只写 1 条」的两种常见排版变形。
+    s5_all = "- 不做 Web 界面，也不写前端页面。\n- 不接数据库，不写定时任务。"
+    s5_one_cont = "- 不做 Web 界面。\n  （命令行就够，用户不需要图形界面。）"
+    s5_one_table = "| 不做的方向 | 原因 |\n| --- | --- |\n| Web 界面 | 用户只用命令行 |"
 
     def sub(text: str, old: str, new: str) -> str:
         """替换前先断言目标真的在文本里。
@@ -1857,6 +1876,23 @@ def selftest() -> int:
          lambda: sub(with_plain_r3(), plain_r3_new,
                      plain_r3_new + "\n\n    <!-- pf-ignore: W2 这版先不量化 -->"),
          set(), {"W2"}, "", set()),
+        # ---- 第 8 轮审计：W6 按「条数」数，不再按「行数」数 ------------------
+        ("非目标只写 1 条：带一行续行也报 W6（第 8 轮 R8-03）",
+         lambda: sub(from_clean(), s5_all, s5_one_cont),
+         set(), {"W6"}, "非目标只写了 1 条"),
+        ("非目标只有单列表格 1 条也报 W6（第 8 轮 R8-03）",
+         lambda: sub(from_clean(), s5_all, s5_one_table),
+         set(), {"W6"}, "非目标只写了 1 条"),
+        # W6 带行号后，豁免注释回到「只对同段生效」：写在 §5 里生效，写在别的段不生效。
+        ("豁免注释：同段的 W6 被吃掉（第 8 轮 R8-03）",
+         lambda: sub(from_clean(), s5_all,
+                     s5_one_cont + "\n<!-- pf-ignore: W6 这版先不补第二条 -->"),
+         set(), set(), "", {"W6"}),
+        ("豁免注释：写在 §4 的 W6 不算数（跨段不生效，第 8 轮 R8-03）",
+         lambda: sub(sub(from_clean(), s5_all, s5_one_cont),
+                     "## 4. 需求（R#）",
+                     "## 4. 需求（R#）\n\n<!-- pf-ignore: W6 这版先不补第二条 -->"),
+         set(), {"W6"}, "", set()),
     ]
     for case in inline:
         name, build, want = case[0], case[1], case[2]

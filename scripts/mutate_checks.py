@@ -266,8 +266,8 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "纸张规格豁免又对 R# 生效（R9 出图被吞掉）", "check_contract.py",
-        '                if letter == "A" and _PAPER_SPEC_TAIL_RE.match(clean[match.end():]):',
-        '                if _PAPER_SPEC_TAIL_RE.match(clean[match.end():]):',
+        '                if letter == "A" and _paper_spec_near(clean, match.start(), match.end()):',
+        '                if _paper_spec_near(clean, match.start(), match.end()):',
     ),
     Mutation(
         "frontmatter 的 tab 缩进不再报 E1（宿主会忽略技能却放行）", "check_skill.py",
@@ -391,6 +391,33 @@ MUTATIONS: list[Mutation] = [
         "description 判定标记不再归一化（零宽「不接」假 E6）", "check_skill.py",
         "    desc_probe = cp.normalize_invisible(desc)",
         "    desc_probe = desc",
+    ),
+    # ---- 第 8 轮审计的 5 条修复各留一处变异 ----
+    Mutation(
+        "C1 纸张规格只认后缀（「纸张大小 A4」又变 ERROR）", "check_contract.py",
+        '                if letter == "A" and _paper_spec_near(clean, match.start(), match.end()):',
+        '                if letter == "A" and _PAPER_SPEC_TAIL_RE.match(clean[match.end():]):',
+    ),
+    Mutation(
+        "C5 通用 shell 命令又算没给命令（echo / grep 报 C5）", "check_contract.py",
+        '    "echo|cat|ls|grep|sed|awk|diff|find|head|tail|sort|uniq|wc|cut|tr|tee|jq|mkdir|cp|mv|rm|"',
+        '    "no-such-command|"',
+    ),
+    Mutation(
+        "W6 又退回按行数数（1 条 + 续行 / 单列表格漏报）", "check_prompt.py",
+        "            if count < 2:",
+        "            if len(body_lines) < 2:",
+    ),
+    Mutation(
+        "W6 又退化成文件级（别的段写 pf-ignore 也能压掉）", "check_prompt.py",
+        '                    "WARN", "W6", "非目标只写了 1 条，建议补到 2 条以上", start + 1))',
+        '                    "WARN", "W6", "非目标只写了 1 条，建议补到 2 条以上"))',
+    ),
+    Mutation(
+        "W5 可选性词表退回 4 个固定短语（「用户可以不选」又报 W5）", "check_skill.py",
+        'OPT_OUT_MARKERS = ["都可以", "你决定", "全按默认", "按默认走",\n'
+        '                   "可以不选", "不选也行", "不用选", "也可以不选", "可跳过"]',
+        'OPT_OUT_MARKERS = ["都可以", "你决定", "全按默认", "按默认走"]',
     ),
 ]
 

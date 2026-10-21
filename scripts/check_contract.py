@@ -81,11 +81,15 @@ LABEL_ACC = "7 验收标准（A#）"
 #: 第 6 轮审计 R6-PF-G3-01：`make` / `go` / `sh` 这些命令名本身也是普通英文词，`make sure` /
 #: `go to` / `sh all` 会被当成命令 —— 命令名后面跟英文虚词时不算命令行。第 6 轮审计
 #: R6-PF-G3-04（round5 REPORT:74 的 backlog）：补齐 yarn/pip/docker 等常见构建与包管理工具。
+#: 第 8 轮审计 R8-02：验收里最常用的通用 shell 命令（echo / grep / cat / diff / find…）也不在表里，
+#: 于是「判定：命令 `echo ok`」被误报 C5，与校验清单 C5 行「反引号里的命令名 + 参数才算」冲突。
 _COMMAND_WORDS = (
     "python[0-9.]*|py[0-9.]*|node|npm|pnpm|npx|yarn|bun|deno|git|bash|zsh|sh|pwsh|powershell|"
     "make|cargo|go|dotnet|java|javac|pytest|ruff|mypy|curl|wget|sqlite3|pip[0-9.]*|uv|poetry|"
     "docker|docker-compose|kubectl|helm|terraform|ansible|gcc|g\\+\\+|clang|rustc|cmake|ninja|"
-    "mvn|gradle|ruby|gem|php|perl|julia|Rscript|ssh|scp|rsync|tar|zip|unzip|ffmpeg|ffprobe|7z"
+    "mvn|gradle|ruby|gem|php|perl|julia|Rscript|ssh|scp|rsync|tar|zip|unzip|ffmpeg|ffprobe|7z|"
+    "echo|cat|ls|grep|sed|awk|diff|find|head|tail|sort|uniq|wc|cut|tr|tee|jq|mkdir|cp|mv|rm|"
+    "chmod|cmp|xargs|md5sum|sha256sum"
 )
 #: 命令名后面紧跟这些英文虚词时是正文句子，不是命令行（`make sure` / `go to` / `sh all`）。
 _COMMAND_STOPWORDS = (
@@ -257,7 +261,9 @@ def check_refs(
                     continue  # 这一处是条目自己的编号，不是引用
                 # 纸张规格只有 A 系列（A0/A1…）：`A4 纸` / `A2 出图` 里的编号不是验收编号（审计 P25）；
                 # R# 永远不是纸张规格，`R9 出图流程` 必须按引用查（第 6 轮审计 R6-PF-G3-02）。
-                if letter == "A" and _PAPER_SPEC_TAIL_RE.match(clean[match.end():]):
+                # 第 8 轮审计 R8-01：规格词在前的写法（`纸张大小 A4` / `页面规格写 A4`）与行内代码
+                # 同口径豁免——旧版这里只看后缀，同一句话加不加反引号结论相反。
+                if letter == "A" and _paper_spec_near(clean, match.start(), match.end()):
                     continue
                 num = int(match.group(1))
                 if num not in known[letter]:
@@ -655,6 +661,17 @@ def selftest() -> int:
          lambda: sub(base, "## 9. 执行步骤",
                      "期望输出（示例）：\n\n    见 R9 的旧版格式\n\n## 9. 执行步骤"),
          set(), set(), set(), ""),
+        # 第 8 轮审计 R8-01：同一个纸张规格，普通文字与行内代码必须同口径豁免。
+        ("C1 纸张规格词在前的普通文字写法也不算引用（第 8 轮 R8-01）",
+         lambda: sub(base, "## 6. 技术约束",
+                     "## 6. 技术约束\n\n- 打印纸张大小 A4，双面打印，页边距 2 厘米。\n"
+                     "- 页面规格写 A4，装订线在左侧。"),
+         set(), set(), set(), ""),
+        # 防单侧过拟合：没有纸张语境时，普通文字与行内代码的 A4 都仍是引用，必须照报 C1。
+        ("C1 没有纸张语境的 A4 普通文字与行内代码都照报（第 8 轮 R8-01 反向）",
+         lambda: sub(base, "## 6. 技术约束",
+                     "## 6. 技术约束\n\n- 验收按 A4 的编号走，`A4` 是旧版编号。"),
+         {"C1"}, set(), set(), ""),
         ("C3/C4「无未确认项」是否定句，不算未确认（第 11 段写「无」也不报 C3）",
          lambda: sub(sub(base,
                          "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",
@@ -752,6 +769,19 @@ def selftest() -> int:
         ("C5 反引号里只写命令名也算给了命令",
          lambda: sub(base, "判定：人工 看 main 分支。", "判定：命令 `pytest`，看退出码。"),
          set(), set(), set(), ""),
+        # —— 第 8 轮审计 R8-02：命令词表补齐通用 shell 命令，但「命令名 + 参数」的边界不能松 ——
+        ("C5 通用 shell 命令 echo 带参数算给了命令（第 8 轮 R8-02）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 `echo ok`，看到输出就继续。"),
+         set(), set(), set(), ""),
+        ("C5 grep 带参数算给了命令（第 8 轮 R8-02）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 跑 `grep -c 1 out/borrow.csv` 看计数。"),
+         set(), set(), set(), ""),
+        ("C5 新增命令词不能把普通英文词也算成命令（第 8 轮 R8-02 反向）",
+         lambda: sub(base, "判定：人工 看 main 分支。",
+                     "判定：命令 用 find the row 的办法，再 sort 一下人工核对。"),
+         set(), {"C5"}, set(), ""),
         # —— 第 7 轮审计撞出来的假绿/假红（R7-PF-G3-01/02/03/04/05）——
         ("C1 别段伪条目不算定义：第 5 段写 R9 不能给悬空引用洗白（R7-PF-G3-01）",
          lambda: sub(sub(base, "## 5. 非目标",

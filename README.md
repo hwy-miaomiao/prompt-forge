@@ -61,7 +61,7 @@ flowchart LR
 5. **提示词是给陌生人看的**：把本次对话全删掉，另一个 AI 只读这个文件也要能开工。
 6. **每条规矩都标出处**：`references/方法论出处.md` 里逐条写明是官方文档、行业标准，还是本仓库自己的设计选择 —— 哪些是抄的、哪些是拍的，一目了然。
 7. **闸门自己也被检验**：三道闸门都是零依赖脚本，`--selftest` 拿真实正反例跑；另有 `scripts/mutate_checks.py`
-   把闸门源码改坏 56 处，每一处都必须让对应的自测变红 —— 防的是"自测空跑、看着全绿其实什么都没查"。
+   把闸门源码改坏 61 处，每一处都必须让对应的自测变红 —— 防的是"自测空跑、看着全绿其实什么都没查"。
 
 ## 快速开始
 
@@ -94,31 +94,33 @@ python scripts/check_prompt.py --selftest
 # PASS  例3-logsift-json-export.prompt.md: 0 ERROR（期望 0 ERROR）
 # PASS  反例-模糊需求.prompt.md: 16 ERROR（期望 >=5 ERROR）
 # PASS  templates/提示词骨架.md: 0 ERROR, 0 WARN（期望 0 ERROR 0 WARN）
-# …… 共 103 个用例 = 这 5 个真实文件 + 98 个内置回归（标题绑定与抢绑、模糊词豁免、
+# …… 共 107 个用例 = 这 5 个真实文件 + 102 个内置回归（标题绑定与抢绑、模糊词豁免、
 #      围栏里的 R# 样例不算条目 / 围栏里的标题不算段落 / ~~~ 也是围栏、
 #      围栏里的 TODO 仍报 E10、A# 的引用写在续行也算数、W8 同义标题歧义、
 #      豁免注释只吃同一段的 WARN / 缺理由与写错码报 E11 / --no-ignore 时豁免失效
 #      四反引号围栏不提前闭合、5 级与 setext 标题、A4 纸不算验收编号、缩进代码块不算条目、
-#      同名段不串豁免、多行豁免注释、UTF-16 BOM、代码块前的 E9 行号不漂
+#      同名段不串豁免、多行豁免注释、UTF-16 BOM、代码块前的 E9 行号不漂、
+#      W6 按条数不按行数、同一段写 pf-ignore 才算数
 #      —— 含文案断言：绑定落在没编号那条时，W8 必须说清选的是哪条）
 
 # 闸门②：检查本技能自己的定义（description 能不能被自动识别、name 会不会让技能静默失效）
 python scripts/check_skill.py --selftest
 # PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
 # PASS  [闸门] 正例夹具: ERROR 码 []（期望 []）
-# …… 共 59 个用例（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑；
+# …… 共 61 个用例（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑；
 #      两者都建不了的环境会 SKIP，不算失败）
-#      = 真实 SKILL.md + 9 个真实示例 + 49 个内置闸门用例（含行号、BOM、长句触发、
-#      `go` 不被 `good` / `Go 语言` 命中、「不接（kill）」不算写了「接」等）
+#      = 真实 SKILL.md + 9 个真实示例 + 51 个内置闸门用例（含行号、BOM、长句触发、
+#      `go` 不被 `good` / `Go 语言` 命中、「不接（kill）」不算写了「接」、
+#      W5 写了「用户可以不选」不报、只写默认档仍报等）
 
 # 闸门③：检查段与段之间对不对得上（需求↔步骤、未确认↔停下条件、判定↔命令）
 python scripts/check_contract.py --selftest
 # PASS  [闸门③] 基准件：闸门① 的自测夹具跨段也对得上: ERROR 码 []（期望 []） WARN 码 []（期望 []）
 # PASS  [闸门③] C1 引用了不存在的需求号: ERROR 码 ['C1']（期望 ['C1']） WARN 码 []（期望 []）
-# …… 共 44 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例
+# …… 共 49 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例
 #      （C1/C3 是 ERROR，C2/C4/C5 是 WARN；最后两条是「范围说明」用例：没东西可查 / 有需求但缺第 9 段、C2 无从检查）
 
-# 变异检验：把闸门源码改坏 56 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
+# 变异检验：把闸门源码改坏 61 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
 python scripts/mutate_checks.py
 ```
 
@@ -188,7 +190,7 @@ python scripts/check_prompt.py <输出目录>/prompt.md
 
 ```bash
 python scripts/check_skill.py SKILL.md
-python scripts/check_skill.py --selftest   # 59 个用例（2 个链接安装用例：Linux 符号链接 / Windows junction 真跑；两者都建不了的环境会 SKIP）
+python scripts/check_skill.py --selftest   # 61 个用例（2 个链接安装用例：Linux 符号链接 / Windows junction 真跑；两者都建不了的环境会 SKIP）
 ```
 
 查的是「自动识别」这件事能不能成立：
@@ -212,7 +214,7 @@ python scripts/check_skill.py --selftest   # 59 个用例（2 个链接安装用
 
 ```bash
 python scripts/check_contract.py <输出目录>/prompt.md
-python scripts/check_contract.py --selftest   # 44 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例
+python scripts/check_contract.py --selftest   # 49 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例
 ```
 
 段落本身写得对（那是闸门① 的活）不等于**段与段对得上**：
@@ -317,7 +319,7 @@ python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 python scripts/check_contract.py --selftest
 python scripts/check_skill.py SKILL.md   # 改过 SKILL.md / AGENTS.md / references/ 之后要跑
-python scripts/mutate_checks.py     # 动了闸门源码就要跑：56 处变异必须全部被抓住
+python scripts/mutate_checks.py     # 动了闸门源码就要跑：61 处变异必须全部被抓住
 ```
 
 新增检查项时请补上反例，并且**先用真实文件跑一遍确认期望的 ERROR 码** —— 照直觉写期望值，
