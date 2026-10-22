@@ -2285,14 +2285,45 @@ def selftest() -> int:
             elapsed = time.perf_counter() - started
         return {f.code for f in findings if f.level == "ERROR"}, elapsed
 
+    # ---- 快速通道必须是真短路（确定性抓「删掉 has_path_token 快速通道」的变异）----
+    # 只靠下面的时间断言抓不住：快机器上 PATH_RE 空转 512KB 也可能 < 3s——GitHub Actions
+    # py3.12 实测变异逃逸（第 9 轮 CI 假绿：本机 Windows 7.08s > 3s 抓住，CI 快 runner < 3s 没抓住）。
+    # 这里用探针替换 PATH_RE，证明「没有点」的文本一次 search 都不发：与机器快慢无关。
+    class _PathProbe:
+        def __init__(self, real: re.Pattern[str]) -> None:
+            self.real = real
+            self.calls = 0
+
+        def search(self, text: str):
+            self.calls += 1
+            return self.real.search(text)
+
+    path_probe = _PathProbe(PATH_RE)
+    globals()["PATH_RE"] = path_probe  # type: ignore[assignment]
+    try:
+        fast_ok = has_path_token("a" * 131072)
+    finally:
+        globals()["PATH_RE"] = path_probe.real
+    fast_ok = fast_ok is False and path_probe.calls == 0
+    print(
+        f"{'PASS' if fast_ok else 'FAIL'}  [闸门] 无点文本走快速通道，不触发 PATH_RE："
+        f"结果 {has_path_token('a' * 8)} / search 调用 {path_probe.calls} 次"
+        f"（期望 False、0 次）"
+    )
+    if not fast_ok:
+        failed += 1
+
     perf_cases = [
         ("无空白超长单行（131072 字符）",
          sub(from_clean(), "每周五花 15 分钟手工抄一遍。[AI 推断]",
              "每周五花 15 分钟手工抄一遍。[AI 推断]\n" + "a" * 131072),
          set(), 5.0),
+        # 长度取到 131072：给「删掉 has_path_token 快速通道」的变异留足时间余量——
+        # 64KB 在有快 runner 上可能 < 3s 逃逸（第 9 轮 CI 实测），128KB 的 O(255n) 足够超时；
+        # 修复后走「没有点」快速通道 < 0.1s，不受影响。
         ("超长单行里带真 URL",
          sub(from_clean(), "每周五花 15 分钟手工抄一遍。[AI 推断]",
-             "每周五花 15 分钟手工抄一遍。[AI 推断]\n" + "b" * 65536 + " 见 https://example.com/x"),
+             "每周五花 15 分钟手工抄一遍。[AI 推断]\n" + "b" * 131072 + " 见 https://example.com/x"),
          set(), 3.0),
         # 交付物段被一行 524288 字母替换（唯一的 out/borrow.csv 没了）：E8 必须照报且不卡。
         # 长度取到 512KB 是为了让「删掉 has_path_token 的改点」真的超时：PATH_RE 的 255 段量词
