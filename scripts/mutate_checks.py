@@ -561,6 +561,59 @@ MUTATIONS: list[Mutation] = [
         "        if any(marker in text for marker in _CONFIRM_MARKERS):",
         "        if False:",
     ),
+    # —— 第 9 轮独立验证 V9-PF：本轮新修的洞，每一个都要有变异钉住，防止自测变空跑 ——
+    Mutation(
+        "认不出的文件类型又静默通过（0 闸门 0 ERROR）", "check.py",
+        '    if kind == "unknown":',
+        "    if False:",
+    ),
+    Mutation(
+        "单入口 --json + 缺路径又返回 0（应为 2）", "check.py",
+        '        "exit_code": 2 if missing else exit_code(errors, warns, strict),',
+        '        "exit_code": exit_code(errors, warns, strict),',
+    ),
+    Mutation(
+        "目录扫描又跟进 junction / 符号链接（循环目录会重复出目标）", "check.py",
+        '    return bool(getattr(stat_result, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)',
+        "    return False",
+    ),
+    Mutation(
+        "证据图片路径又允许 ../ 跳出去（目录外真图也算证据）", "check_skill.py",
+        "        if not _is_within(resolved, base_resolved):",
+        "        if False:",
+    ),
+    Mutation(
+        "同一张图换种写法又各算一张（凑够张数）", "check_skill.py",
+        "        if key in seen_paths:\n"
+        "            continue",
+        "        if False:\n"
+        "            continue",
+    ),
+    Mutation(
+        "PNG 截断（没有 IDAT/IEND）又算真图", "check_skill.py",
+        '        if b"IDAT" not in data or data.rfind(b"IEND") < len(data) - 64:',
+        "        if False:",
+    ),
+    Mutation(
+        "「截图 2 张」这种数量后置的声明又看不懂（误报 E8）", "check_skill.py",
+        '        match = EVIDENCE_DECL_ALT_RE.match(value.strip().strip("`\'\\""))',
+        "        match = None",
+    ),
+    Mutation(
+        "min 只写一边/写 0 又静默关掉尺寸检查", "check_skill.py",
+        "    if has_min and (min_w <= 0 or min_h <= 0):",
+        "    if False:",
+    ),
+    Mutation(
+        "D5 英文空话又放行（I checked, all good）", "check_confirm.py",
+        '    body = _EVIDENCE_FILLER_EN_RE.sub("", body)',
+        "    body = body",
+    ),
+    Mutation(
+        "D5 只用 emoji/符号填充又算实质证据", "check_confirm.py",
+        '    return re.sub(r"[\\W_]+", "", body)',
+        "    return body",
+    ),
 ]
 
 

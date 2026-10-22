@@ -73,7 +73,7 @@ flowchart LR
 5. **提示词是给陌生人看的**：把本次对话全删掉，另一个 AI 只读这个文件也要能开工。
 6. **每条规矩都标出处**：`references/方法论出处.md` 里逐条写明是官方文档、行业标准，还是本仓库自己的设计选择 —— 哪些是抄的、哪些是拍的，一目了然。
 7. **闸门自己也被检验**：四道闸门都是零依赖脚本，`--selftest` 拿真实正反例跑；另有 `scripts/mutate_checks.py`
-   把闸门源码改坏 86 处，每一处都必须让对应的自测变红 —— 防的是"自测空跑、看着全绿其实什么都没查"。
+   把闸门源码改坏 96 处，每一处都必须让对应的自测变红 —— 防的是"自测空跑、看着全绿其实什么都没查"。
 8. **过程记录也过闸门**：分诊三态、五步证据链（intake → research → define → shape → decide）、问询模式、
    每道题的方法来源与「落到 prompt.md 哪一段」的追溯都写进 `需求确认.md`，闸门④ 逐项校验；
    问询也不再靠临场想 —— `references/需求问询-方法映射.md` 与 `scripts/pick_methods.py`
@@ -111,8 +111,10 @@ cd prompt-forge
 ```bash
 # 单入口：自动识别目标（.prompt.md / 需求确认 / SKILL.md），把对应闸门各跑一遍
 python scripts/check.py --selftest
-# …… 26 个用例：分类口径（文件名优先、正文特征兜底）、合格资产 0 ERROR、
-#      4 份反例被拦（16 / 10 / 3 / 1 ERROR）、--json 结构、退出码口径、目录模式、真 CLI 子进程
+# …… 32 个用例：分类口径（文件名优先、正文特征兜底）、合格资产 0 ERROR、
+#      4 份反例被拦（16 / 10 / 3 / 1 ERROR）、--json 结构、退出码口径、目录模式、真 CLI 子进程、
+#      认不出的文件报 E0（不静默放行）、junction / 符号链接循环不跟进也不崩、
+#      缺路径 rc=2 且 --json 时 stdout 仍是纯 JSON（missing 字段 + exit_code=2）
 
 # 闸门①：检查产出的长提示词本身（12 段契约）
 python scripts/check_prompt.py --selftest
@@ -134,7 +136,7 @@ python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 # PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
 # PASS  [闸门] 正例夹具: ERROR 码 []（期望 []）
-# …… 共 76 个用例（真实 SKILL.md + 11 个真实示例 + 内置闸门用例；其中 11 条是迭代证据回归、
+# …… 共 88 个用例（真实 SKILL.md + 11 个真实示例 + 内置闸门用例；其中 24 条是迭代证据回归、
 #      1 条验证「单独分发 check_skill.py 也能跑」；2 个目录链接用例在 Linux 用符号链接、
 #      Windows 用 junction 真跑，两者都建不了的环境会 SKIP，不算失败）
 #      内置用例含行号、BOM、长句触发、`go` 不被 `good` / `Go 语言` 命中、
@@ -150,13 +152,13 @@ python scripts/check_contract.py --selftest
 
 # 闸门④：检查需求确认.md（过程记录：三态 / 五步证据链 / 问询模式 / 方法来源 / 追溯）
 python scripts/check_confirm.py --selftest
-# …… 共 65 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（合计 68 条 PASS；模板原样提交必须被拦）
+# …… 共 71 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（合计 74 条 PASS；模板原样提交必须被拦）
 
 # 问询方法库：按需求形态与缺口维度给带默认档的方法清单
 python scripts/pick_methods.py --selftest
 # …… 14 个检查
 
-# 变异检验：把闸门源码改坏 86 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
+# 变异检验：把闸门源码改坏 96 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
 python scripts/mutate_checks.py
 ```
 
@@ -232,7 +234,7 @@ python scripts/check_prompt.py <输出目录>/prompt.md
 
 ```bash
 python scripts/check_skill.py SKILL.md
-python scripts/check_skill.py --selftest   # 76 个用例（真实 SKILL.md + 11 个真实示例 + 内置用例；2 个链接安装用例：Linux 符号链接 / Windows junction 真跑，两者都建不了的环境会 SKIP）
+python scripts/check_skill.py --selftest   # 88 个用例（真实 SKILL.md + 11 个真实示例 + 内置用例；2 个链接安装用例：Linux 符号链接 / Windows junction 真跑，两者都建不了的环境会 SKIP）
 ```
 
 查的是「自动识别」这件事能不能成立：
@@ -248,10 +250,12 @@ python scripts/check_skill.py --selftest   # 76 个用例（真实 SKILL.md + 11
 - 正文**引用**的 `AGENTS.md` / `references/` / `scripts/check_prompt.py` 是否真的都在同目录
   （只拷 `SKILL.md` 是最常见的安装事故）。只有"同目录"才算数：`../AGENTS.md`、绝对路径不算缺件，
   而且只查**被引用的**那几个路径；
-- **迭代证据**（第 9 轮新增，`E8`/`E9`）：frontmatter 可选声明 `evidence: 2 images`（可加 `min 32x32`），
-  声明后正文必须有「迭代记录 / 自检」章节，里面写至少 N 个**真实存在**的图片相对路径（相对 `SKILL.md`
-  所在目录）：路径不存在、扩展名不在 PNG/JPEG/WebP 白名单、文件魔数对不上（文本改名成 `.png`）、
-  尺寸不达标都报 `E9`；声明看不懂或数量不够报 `E8`。**没声明 `evidence:` 的技能完全不受影响** ——
+- **迭代证据**（第 9 轮新增，`E8`/`E9`）：frontmatter 可选声明 `evidence: 2 images`（可加 `min 32x32`；
+  也认「截图 2 张」这种名词在前的写法），声明后正文的「迭代记录 / 自检记录 / 验证记录」等章节（可以有多节，合并计）
+  里至少写 N 个**真实存在**的图片相对路径（相对 `SKILL.md` 所在目录）：路径不存在、扩展名不在 PNG/JPEG/WebP
+  白名单、文件魔数对不上（文本改名成 `.png`）、图片头被截断或 IHDR/尺寸解析不出来（伪 PNG）、尺寸不达标，
+  以及 `../`、绝对路径、链接跳到 `SKILL.md` 目录之外，都报 `E9`；同一张图换个写法重复写只算一张；
+  声明看不懂、声明里 `min` 只写一边或写 0、数量不够报 `E8`。**没声明 `evidence:` 的技能完全不受影响** ——
   这条只服务「愿意把看过/做过写成证据」的技能，示例见 `examples/技能定义/evidence-images/`
   与反例 `examples/技能定义/evidence-fake/`。约定写进 [`references/校验清单.md`](references/校验清单.md) 的闸门② 一节。
 
@@ -280,7 +284,7 @@ python scripts/check_contract.py --selftest   # 57 个用例 + 2 个 --no-ignore
 
 ```bash
 python scripts/check_confirm.py <输出目录>/需求确认.md
-python scripts/check_confirm.py --selftest   # 65 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（合计 68 条 PASS）
+python scripts/check_confirm.py --selftest   # 71 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（合计 74 条 PASS）
 ```
 
 查的是分诊三态、五步证据链（intake → research → define → shape → decide，每步要有证据词）、
@@ -304,9 +308,11 @@ python scripts/check.py --strict --json <文件>    # WARN 也算失败；机器
 ```
 
 识别规则：`SKILL.md` 或含 `SKILL.md` 的目录 → 闸门②；文件名含「需求确认」、或正文有
-「目标体检 / 问询与拍板 / 分诊结论 / 证据链（intake…）」→ 闸门④；`.prompt.md` 或其它 `.md` → 闸门① + ③。
+「目标体检 / 问询与拍板 / 分诊结论 / 证据链（intake…）」→ 闸门④；`.prompt.md` 或其它 `.md` → 闸门① + ③；
+既认不出类型、也不是目录的文件 → `E0`（不静默放行）；目录递归时遇到 junction / 符号链接**不跟进**（防循环）。
 既有四个脚本的独立 CLI 行为不变：`check.py` 只是按目标把它们各调一遍，判据只有一份。
 退出码：有 ERROR → 1；只有 WARN → 0（`--strict` 时 1）；路径不存在或用法错 → 2。
+`--json` 时 stdout 只有 JSON —— 路径不存在也照样给 JSON（`missing` 列表 + `exit_code: 2`），方便机器读。
 对标的竞品是 spec-kit / OpenSpec 的「一条命令跑完整流程」，差异是**离线、零依赖、确定性**：
 不调模型、不联网、同一份文件永远同样的输出，适合直接接 CI 或 pre-commit。
 
@@ -407,7 +413,7 @@ python scripts/check_contract.py --selftest
 python scripts/check_confirm.py --selftest
 python scripts/pick_methods.py --selftest
 python scripts/check_skill.py SKILL.md   # 改过 SKILL.md / AGENTS.md / references/ 之后要跑
-python scripts/mutate_checks.py     # 动了闸门源码就要跑：86 处变异必须全部被抓住
+python scripts/mutate_checks.py     # 动了闸门源码就要跑：96 处变异必须全部被抓住
 ```
 
 新增检查项时请补上反例，并且**先用真实文件跑一遍确认期望的 ERROR 码** —— 照直觉写期望值，

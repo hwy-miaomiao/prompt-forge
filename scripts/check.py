@@ -18,8 +18,10 @@
     文件名含「需求确认」或正文有「目标体检 / 问询与拍板 / 分诊结论」 → 闸门④ check_confirm
     `.prompt.md` / 其余 `.md` 提示词文档 → 闸门① check_prompt + 闸门③ check_contract
     目录（不含 SKILL.md）               → 递归找 .prompt.md / 需求确认 / SKILL.md 逐个查
+    认不出的文件（例如 `.txt` / `.py`）  → E0 ERROR（不能 0 闸门静默「通过」）
 
 退出码：有 ERROR → 1；只有 WARN → 0（--strict 时 1）；路径不存在/用法错误 → 2。
+路径不存在时 --json 仍只往 stdout 写一份 JSON（`missing` 字段列出缺的路径、exit_code 为 2）。
 既有四个闸门脚本的独立 CLI 行为不变，本脚本只做编排。
 """
 
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -145,13 +148,14 @@ def check_target(path: Path) -> TargetResult:
     # 「含 SKILL.md 的目录」按目录里的 SKILL.md 查；展示路径仍是调用者给的那个。
     actual = path / _SKILL_NAME if kind == "skill" and path.is_dir() else path
     target = TargetResult(path, kind)
-    if kind == "unknown" and path.is_dir():
-        target.gates.append(GateResult(
-            "识别",
-            [cp.Finding("ERROR", "E0",
-                        "目录里没有可检查的文件：需要 `.prompt.md`、文件名含「需求确认」的 `.md`，"
-                        "或含 `SKILL.md` 的技能目录", 0)],
-        ))
+    if kind == "unknown":
+        # 第 9 轮独立验证 V9-PF-01：unknown 文件以前 0 闸门 0 ERROR → rc=0「通过」，
+        # 等于把 `foo.txt` 当合格资产；目录形态早就报 E0，文件形态必须同口径。
+        message = ("目录里没有可检查的文件：需要 `.prompt.md`、文件名含「需求确认」的 `.md`，"
+                   "或含 `SKILL.md` 的技能目录" if path.is_dir() else
+                   "无法识别的文件类型：需要 `.prompt.md`、文件名含「需求确认」的 `.md`，"
+                   "或 `SKILL.md`")
+        target.gates.append(GateResult("识别", [cp.Finding("ERROR", "E0", message, 0)]))
         return target
     for label, gate_kind in GATE_PLANS[kind]:
         result = _run_gate(gate_kind, actual)
@@ -160,24 +164,55 @@ def check_target(path: Path) -> TargetResult:
     return target
 
 
+#: Windows 目录 junction / 其他重解析点的文件属性位（Python 3.9 没有 `Path.is_junction()`）。
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_link_entry(entry: "os.DirEntry[str]") -> bool:
+    """目录项是不是链接（符号链接 / junction / 其他重解析点）：扫描时一律不进入。"""
+    try:
+        if entry.is_symlink():
+            return True
+        stat_result = entry.stat(follow_symlinks=False)
+    except OSError:
+        return True
+    return bool(getattr(stat_result, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def _iter_dir(dir_path: Path) -> list[Path]:
     """目录模式：递归找可检查的文件（跳 .git / __pycache__ 之类的噪音目录）。
 
     只收明确的目标类型（`*.prompt.md` / 文件名含「需求确认」/ `SKILL.md`）；不含这些特征的
     普通 `.md`（README、CHANGELOG…）不参与目录扫描 —— 要看它们就显式传文件路径。
+
+    第 9 轮独立验证 V9-PF-02：旧版用 `dir_path.rglob("*")`，它会跟进目录符号链接 / junction：
+    遇到「子目录 junction 指回祖先」的目录树会无限递归（3.12 上跑出 64 个重复目标，3.9 上
+    直接 `OSError: [WinError 1921]` 崩掉）。这里改成自己 scandir 遍历，**不进入任何链接**。
     """
     found: list[Path] = []
     noise = {".git", "__pycache__", ".review-tmp", ".audit"}
-    for child in sorted(dir_path.rglob("*")):
-        if not child.is_file():
-            continue
-        # 只看扫描根之下的相对路径：临时目录本身可能就在 `.audit/` 里，按绝对路径判会把
-        # 镜像里的整个 examples 都跳过（变异检验时踩到过）。
-        if any(part in noise for part in child.relative_to(dir_path).parts[:-1]):
-            continue
-        name = child.name
-        if name == _SKILL_NAME or "需求确认" in name or name.endswith(".prompt.md"):
-            found.append(child)
+
+    def scan(current: Path) -> None:
+        try:
+            entries = sorted(os.scandir(current), key=lambda item: item.name)
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name in noise or _is_link_entry(entry):
+                        continue
+                    scan(Path(entry.path))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                name = entry.name
+                if name == _SKILL_NAME or "需求确认" in name or name.endswith(".prompt.md"):
+                    found.append(Path(entry.path))
+            except OSError:  # pragma: no cover - 权限/被占用等，跳过该项即可
+                continue
+
+    scan(dir_path)
     return found
 
 
@@ -217,15 +252,19 @@ def _finding_dict(finding) -> dict:
     }
 
 
-def build_payload(results: list[TargetResult], strict: bool) -> dict:
+def build_payload(results: list[TargetResult], strict: bool,
+                  missing: list[str] | None = None) -> dict:
     errors = sum(target.errors for target in results)
     warns = sum(target.warns for target in results)
+    missing = list(missing or [])
     return {
         "tool": "prompt-forge check",
         "version": 1,
         "strict": strict,
-        "exit_code": exit_code(errors, warns, strict),
+        # 路径不存在属于用法错误：即使其它目标全过，也按 rc=2 退出（与文本模式同口径）。
+        "exit_code": 2 if missing else exit_code(errors, warns, strict),
         "totals": {"targets": len(results), "errors": errors, "warns": warns},
+        "missing": missing,
         "targets": [
             {
                 "path": str(target.path),
@@ -334,6 +373,19 @@ def selftest() -> int:
         got = detect_kind(neutral)
         report_case("正文特征识别需求确认（文件名不叫需求确认）", got == "confirm", f"实际 {got}")
 
+    # 1c) 认不出的目标不能 0 闸门静默「通过」（第 9 轮独立验证 V9-PF-01）
+    with tempfile.TemporaryDirectory() as tmp:
+        stray = Path(tmp) / "notes.txt"
+        stray.write_bytes(b"hello\n")
+        target = check_target(stray)
+        code = exit_code(target.errors, target.warns, False)
+        report_case("认不出的文件报 E0 且 rc=1", target.errors > 0 and code == 1,
+                    f"{target.errors} ERROR / rc={code}")
+        report_case("认不出的文件被标成 unknown", detect_kind(stray) == "unknown")
+        empty = Path(tmp) / "empty-dir"
+        empty.mkdir()
+        report_case("空目录仍报 E0", check_target(empty).errors > 0)
+
     # 2) 合格资产：0 ERROR（WARN 不阻断）
     clean_cases = [
         examples / "例1-下载文件夹整理.prompt.md",
@@ -386,6 +438,37 @@ def selftest() -> int:
               and sum(1 for target in dir_results if target.kind == "skill") >= 9)
     report_case("目录模式递归找目标且跳过 README", ok_dir, f"{len(dir_results)} 个目标")
 
+    # 6b) 目录里有 junction 指回祖先时不能无限递归（第 9 轮独立验证 V9-PF-02）。
+    #     Linux 用符号链接；Windows 没有开发者模式建不了符号链接，但 junction 不需要权限。
+    def make_dir_link(real: Path, link: Path) -> bool:
+        try:
+            os.symlink(real, link, target_is_directory=True)
+            return True
+        except (OSError, NotImplementedError):
+            pass
+        if os.name != "nt":
+            return False
+        try:
+            proc = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(real)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+            )
+        except OSError:
+            return False
+        return proc.returncode == 0 and link.is_dir()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "tree"
+        (root / "sub").mkdir(parents=True)
+        (root / "a.prompt.md").write_bytes(b"x\n")
+        if make_dir_link(root, root / "sub" / "back"):
+            loop_results = expand_targets([root])
+            names = [target.path.name for target in loop_results]
+            report_case("目录里的 junction 循环不会无限递归/重复",
+                        names == ["a.prompt.md"], f"{names[:5]}（共 {len(names)} 个目标）")
+        else:
+            print("SKIP  [单入口] junction 循环用例：当前环境建不了目录链接")
+
     # 7) 真 CLI：子进程跑一次合格资产（rc 0）与反例（rc 1），并验证 --json 只有 JSON
     script = Path(__file__).resolve()
     for path, want_rc, label in (
@@ -413,6 +496,29 @@ def selftest() -> int:
         ok_cli_json = False
     report_case("CLI --json 的 stdout 是纯 JSON", ok_cli_json)
 
+    # 8) 路径不存在：rc=2；--json 时 stdout 仍必须是纯 JSON（第 9 轮独立验证 V9-PF-03）
+    missing_path = str((examples / "不存在的文件.prompt.md").resolve())
+    proc = subprocess.run(
+        [sys.executable, "-X", "utf8", "-B", str(script), missing_path],
+        cwd=str(repo), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+    )
+    report_case("CLI 路径不存在 rc=2", proc.returncode == 2,
+                f"rc={proc.returncode}（期望 2）")
+    proc = subprocess.run(
+        [sys.executable, "-X", "utf8", "-B", str(script), "--json",
+         str(examples / "例1-下载文件夹整理.prompt.md"), missing_path],
+        cwd=str(repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    try:
+        parsed = json.loads(proc.stdout.decode("utf-8", "replace"))
+        ok_missing_json = (proc.returncode == 2 and parsed.get("missing") == [missing_path]
+                          and parsed.get("exit_code") == 2
+                          and parsed.get("totals", {}).get("targets") == 1)
+    except ValueError:
+        ok_missing_json = False
+    report_case("CLI --json + 缺路径：stdout 纯 JSON 且 exit_code=2", ok_missing_json,
+                f"rc={proc.returncode}")
+
     print(f"\n自测结果：{'全部通过' if not failed else f'{failed} 个用例不通过'}")
     return 1 if failed else 0
 
@@ -433,20 +539,23 @@ def main() -> int:
         parser.print_help()
         return 2
     results: list[TargetResult] = []
-    missing = 0
+    missing: list[str] = []
     for name in args.paths:
         path = Path(name)
         if not path.exists():
-            print(f"ERROR: 文件或目录不存在：{path}")
-            missing += 1
+            missing.append(str(path))
             continue
         results.extend(expand_targets([path]))
-    if missing:
-        return 2
     if args.json:
-        payload = build_payload(results, args.strict)
+        # 第 9 轮独立验证 V9-PF-03：--json 的 stdout 必须始终是纯 JSON；缺路径的信息进
+        # `missing` 字段、用 exit_code=2 表达，不能先打一行人类可读文本再去解析失败。
+        payload = build_payload(results, args.strict, missing)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return payload["exit_code"]
+    if missing:
+        for name in missing:
+            print(f"ERROR: 文件或目录不存在：{name}")
+        return 2
     return print_summary(results, args.strict)
 
 

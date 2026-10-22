@@ -32,7 +32,8 @@ python scripts/check_prompt.py --selftest
 薄包装有没有把同目录的规范一起带上。11 个目录（2 正 9 反）+ 每个的预期 ERROR/WARN 码见
 [`技能定义/README.md`](技能定义/README.md)。其中 `evidence-images/` 与 `evidence-fake/`
 是第 9 轮新增的「迭代证据」一正一反：声明 `evidence: 2 images` 后，正文迭代记录里必须引用
-真实存在、魔数正确的 PNG/JPEG/WebP 相对路径（细节见 `references/校验清单.md` 闸门② 的迭代证据约定）。
+真实存在、魔数与结构正确的 PNG/JPEG/WebP 相对路径，且不能 `../` 越界、同一张图换写法重复写只算一张
+（细节见 `references/校验清单.md` 闸门② 的迭代证据约定）。
 
 ```bash
 python scripts/check_skill.py --selftest
@@ -40,7 +41,7 @@ python scripts/check_skill.py --selftest
 # PASS  [示例] good-minimal: ERROR [] WARN []（期望 ERROR [] WARN []）
 # PASS  [示例] evidence-images: ERROR [] WARN []（期望 ERROR [] WARN []）
 # PASS  [示例] evidence-fake: ERROR ['E8', 'E9'] WARN []（期望 ERROR ['E8', 'E9'] WARN []）
-# ... 其余 8 个反例逐个 PASS，最后 `自测结果：全部通过`（共 76 个用例）
+# ... 其余 8 个反例逐个 PASS，最后 `自测结果：全部通过`（共 88 个用例）
 ```
 
 ## 还有一组：`examples/需求确认/`（闸门④的夹具）
@@ -56,7 +57,7 @@ python scripts/check_skill.py --selftest
 ```bash
 python scripts/check_confirm.py "examples/需求确认/例1-下载文件夹整理.需求确认.md"
 # 结果：0 ERROR, 0 WARN —— 通过
-python scripts/check_confirm.py --selftest   # 65 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（68 PASS）
+python scripts/check_confirm.py --selftest   # 71 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（74 PASS）
 ```
 
 ## 这些文件还要过闸门③（跨段一致性）

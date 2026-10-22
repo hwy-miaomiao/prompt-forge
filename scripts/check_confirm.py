@@ -290,8 +290,18 @@ _EVIDENCE_FILLER_WORDS = tuple(sorted({
     "确认", "核实", "补充", "后续", "暂时", "目前", "现在", "当前", "看情况", "视情况", "再说",
     "大概率", "应该", "可能是", "也许是", "大概是", "估计", "猜测", "看起来", "听起来", "似乎",
     "好像", "恐怕", "说不定", "结论", "情况", "是", "无", "没", "未", "空", "暂", "先", "再", "等", "看",
-    "查", "我",
+    "查", "我", "基本靠谱", "靠谱", "跑通了", "都跑通", "我觉得", "应该可以", "差不多",
 }, key=lambda word: (-len(word), word)))
+
+#: 英文里同样常见的空话（第 9 轮独立验证 V9-PF-11）：「I checked, all good」「should be ok」
+#: 这类整句没有可复查的信息，按中文同一口径不算证据。只收**多词短语**，避免把正常英文
+#: 证据（`pytest`、`42 passed`、`exit code 0`）里的单词误伤成空话。
+_EVIDENCE_FILLER_EN_RE = re.compile(
+    r"(?:i\s+(?:checked|think|guess|believe)|all\s+good|should\s+(?:be\s+)?ok(?:ay)?|"
+    r"works?\s+fine|looks?\s+(?:good|fine)|seems?\s+(?:fine|ok(?:ay)?)|"
+    r"no\s+(?:problem|issues?)|probably|maybe)",
+    re.IGNORECASE,
+)
 
 
 def _evidence_substance(text: str) -> str:
@@ -300,14 +310,19 @@ def _evidence_substance(text: str) -> str:
     判 D5 时只要残留为空（或过短），就说明这段证据只是在说「没有 / 不适用 / 待补 / 按默认」，
     哪怕加括号、加逗号后半句、把填充词挪到句中，也不该算证据。
     填充词按「任意位置」剥：`还没查，先按默认` 里的「还没」「先按默认」不在行首也要剥掉。
+    第 9 轮独立验证 V9-PF-11：标点只列常见标点不够 —— `🎉🎉实测🎉🎉` / `✝✝实测✝✝` 用
+    emoji/符号填长度就能冒充实质内容。与 D3 同口径，最后只保留文字与数字。
     """
     body = re.sub(r"[（(][^（）()]*[）)]", "", text)
     body = re.sub(r"(?:证据|依据|理由|原因|来源|为什么|实测|原话)", "", body)
+    # 英文空话按多词短语整段剥（要在去空格/标点之前做，否则 "I checked" 会先被粘成
+    # "Ichecked" 而匹配不上）。
+    body = _EVIDENCE_FILLER_EN_RE.sub("", body)
     body = re.sub(r"[\s。．.;；,，、:：…!！?？\-—_/\\|（）()\[\]【】「」『』\"'']", "", body)
     for word in _EVIDENCE_FILLER_WORDS:
         if word in body:
             body = body.replace(word, "")
-    return body
+    return re.sub(r"[\W_]+", "", body)
 
 
 def _evidence_ok(content: str) -> bool:
@@ -878,6 +893,19 @@ def selftest() -> int:
          lambda: sub(base, intake_line, "- intake：证据：我跑过命令了，结果都没问题"), {"D5"}, set(), ""),
         ("R9 证据写成「已经确认过了」",
          lambda: sub(base, intake_line, "- intake：证据：已经确认过了"), {"D5"}, set(), ""),
+        # 第 9 轮独立验证 V9-PF-11：emoji / 英文空话 / 中文口头禅填充也必须被 D5 拦下。
+        ("R9v 证据用 emoji 夹一个「实测」凑数",
+         lambda: sub(base, intake_line, "- intake：证据：🎉🎉实测🎉🎉"), {"D5"}, set(), ""),
+        ("R9v 证据用符号填充（✝✝✝✝实测✝✝✝✝）",
+         lambda: sub(base, intake_line, "- intake：证据：✝✝✝✝实测✝✝✝✝"), {"D5"}, set(), ""),
+        ("R9v 证据写成英文空话「I checked, all good.」",
+         lambda: sub(base, intake_line, "- intake：证据：I checked, all good."), {"D5"}, set(), ""),
+        ("R9v 证据写成英文空话「I think it works fine」",
+         lambda: sub(base, intake_line, "- intake：证据：I think it works fine"), {"D5"}, set(), ""),
+        ("R9v 证据写成中文口头禅「都跑通了」",
+         lambda: sub(base, intake_line, "- intake：证据：都跑通了"), {"D5"}, set(), ""),
+        ("R9v 证据写成中文口头禅「基本靠谱」",
+         lambda: sub(base, intake_line, "- intake：证据：基本靠谱"), {"D5"}, set(), ""),
         ("R9 追溯段号 99 越界",
          lambda: sub(base, q2_line, q2_line.replace("R2 + A2", "第 99 段")), {"D9"}, set(), ""),
         ("R9 追溯段号 0 越界",

@@ -58,7 +58,8 @@ audience / memory / success criteria / examples 这九个维度里，哪些已�
    交付时把长提示词**全文**放进回复里，而不是只说「已写入文件」。
    改动过本文件、`AGENTS.md` 或 `references/` 的话，另外跑 `python scripts/check_skill.py SKILL.md`
    —— 它查的是这个技能自己还能不能被宿主自动识别（frontmatter 写错会让技能静默失效）；
-   如果本技能在 frontmatter 声明了 `evidence:`，它还会验正文「迭代记录」里的图片路径是不是真实存在。
+   如果本技能在 frontmatter 声明了 `evidence:`，它还会验正文「迭代记录」里的图片路径是不是真实存在、
+   是不是相对路径（`../` 越界不算）、同一张图有没有换写法重复充数。
    改动过任何闸门脚本（`scripts/*.py`）的话，六份 `--selftest`（四个闸门 + `pick_methods.py` + `check.py`）
    与 `python scripts/mutate_checks.py` 都要重跑。
    只想跑该跑的闸门时，用单入口：`python scripts/check.py <输出目录>`（自动识别目标；

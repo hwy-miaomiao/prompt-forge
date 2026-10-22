@@ -520,10 +520,18 @@ EVIDENCE_DEFAULT_COUNT = 2
 EVIDENCE_MAX_COUNT = 20
 EVIDENCE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 EVIDENCE_EXTENSION_NOTE = "PNG / JPEG / WebP"
-#: `evidence:` 的取值：`images` / `2 images` / `截图 2 张`，可带 `min 32x32`。
+#: `evidence:` 的取值：`images` / `2 images` / `截图 2 张`（数量在名词后也算），可带 `min 32x32`。
 EVIDENCE_DECL_RE = re.compile(
     r"^(?:(\d+)\s*)?(?:张|个)?\s*"
     r"(?:images?|pics?|pictures?|screenshots?|shots?|截图|图片|照片|图)\s*"
+    r"(?:min(?:imum)?\s+(\d+)\s*[x×*]\s*(\d+))?$",
+    re.IGNORECASE,
+)
+#: 中文里数量常写在名词后面（`截图 2 张`）：第 9 轮独立验证 V9-PF-06，EVIDENCE_DECL_RE
+#: 只认「数量在前」，而代码注释和文档都宣称支持 `截图 2 张` —— 补一条名词在前的解析。
+EVIDENCE_DECL_ALT_RE = re.compile(
+    r"^(?:images?|pics?|pictures?|screenshots?|shots?|截图|图片|照片|图)\s*"
+    r"(\d+)\s*(?:张|个)?\s*"
     r"(?:min(?:imum)?\s+(\d+)\s*[x×*]\s*(\d+))?$",
     re.IGNORECASE,
 )
@@ -543,22 +551,58 @@ def _parse_evidence_decl(value: str) -> tuple[int, int, int] | None:
     """`evidence:` 取值 → (张数, 最小宽, 最小高)；看不懂返回 None（调用方报 E8）。"""
     match = EVIDENCE_DECL_RE.match(value.strip().strip("`'\""))
     if not match:
+        match = EVIDENCE_DECL_ALT_RE.match(value.strip().strip("`'\""))
+    if not match:
         return None
     count = int(match.group(1)) if match.group(1) else EVIDENCE_DEFAULT_COUNT
     if not 1 <= count <= EVIDENCE_MAX_COUNT:
         return None
+    has_min = match.group(2) is not None
     min_w = int(match.group(2)) if match.group(2) else 0
     min_h = int(match.group(3)) if match.group(3) else 0
+    # 第 9 轮独立验证 V9-PF-07：`min 32x0` / `min 0x32` / `min 0x0` 以前能被接受，而尺寸
+    # 检查要求 `min_w and min_h` 同时非零 —— 等于声明了最小尺寸却静默关掉检查。只要写了 min，
+    # 宽高就必须都是正数；不写 min 才是「不查尺寸」。
+    if has_min and (min_w <= 0 or min_h <= 0):
+        return None
     return count, min_w, min_h
 
 
-def _evidence_section(lines: list[str], fm_end: int) -> tuple[str, int] | None:
-    """找正文里的「迭代记录 / 自检」章节：返回 (章节正文, 正文起始 0-based 行号)。"""
-    for idx in range(fm_end, len(lines)):
+#: 围栏代码块标记（``` 或 ~~~）：里面的内容算格式示范，不算「本轮迭代证据」。
+_FENCE_LINE_RE = re.compile(r"^\s*(```+|~~~+)")
+
+
+def _strip_fenced(text: str) -> str:
+    """去掉围栏代码块里的内容（代码块里的示例图片路径不该被当成证据）。"""
+    kept: list[str] = []
+    fence = ""
+    for line in text.splitlines():
+        match = _FENCE_LINE_RE.match(line)
+        if match:
+            marker = match.group(1)[0]
+            if not fence:
+                fence = marker
+                continue
+            if marker == fence:
+                fence = ""
+                continue
+        if not fence:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _evidence_sections(lines: list[str], fm_end: int) -> list[tuple[str, int]]:
+    """找正文里所有「迭代记录 / 自检」章节：返回 [(章节正文, 正文起始 0-based 行号)]。
+
+    第 9 轮独立验证 V9-PF-05：旧版只取**第一个**匹配章节，于是「`## 自检`（空）在前、
+    `## 迭代记录`（带图）在后」会假报 E8 —— 技能正文的章节顺序不该改变结论。
+    """
+    sections: list[tuple[str, int]] = []
+    idx = fm_end
+    while idx < len(lines):
         match = _SECTION_HEADING_RE.match(lines[idx])
-        if not match:
-            continue
-        if not any(marker in match.group(2) for marker in EVIDENCE_SECTION_MARKERS):
+        if not match or not any(marker in match.group(2) for marker in EVIDENCE_SECTION_MARKERS):
+            idx += 1
             continue
         level = len(match.group(1))
         end = len(lines)
@@ -567,8 +611,9 @@ def _evidence_section(lines: list[str], fm_end: int) -> tuple[str, int] | None:
             if other and len(other.group(1)) <= level:
                 end = jdx
                 break
-        return "\n".join(lines[idx + 1:end]), idx + 1
-    return None
+        sections.append(("\n".join(lines[idx + 1:end]), idx + 1))
+        idx = end if end > idx else idx + 1
+    return sections
 
 
 def _evidence_refs(section: str) -> list[str]:
@@ -626,16 +671,34 @@ def _webp_size(data: bytes) -> tuple[int, int]:
 
 
 def _image_info(data: bytes) -> tuple[str, int, int] | None:
-    """按文件魔数判断格式与像素尺寸（PNG / JPEG / WebP）；读不出来返回 None。"""
-    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+    """按文件魔数判断格式与像素尺寸（PNG / JPEG / WebP）；读不出来返回 None。
+
+    第 9 轮独立验证 V9-PF-08：旧版只验魔数前缀就算「真图」——3 字节 `\\xff\\xd8\\xff`、
+    12 字节 `RIFF....WEBP`、PNG 签名后接 16 个零字节都能过。现在验到结构层：
+    PNG 要有 IHDR + 正宽高 + IDAT + IEND；JPEG 要能解出 SOF 尺寸且有 EOI；WebP 的 RIFF
+    长度字段要与文件长度一致、且能解出正宽高。仍然零依赖、只读头部，不解码像素。
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        if len(data) < 33 or data[12:16] != b"IHDR":
+            return None
+        if b"IDAT" not in data or data.rfind(b"IEND") < len(data) - 64:
+            return None
         width = int.from_bytes(data[16:20], "big")
         height = int.from_bytes(data[20:24], "big")
+        if not (0 < width <= 65535 and 0 < height <= 65535):
+            return None
         return "png", width, height
     if data.startswith(b"\xff\xd8\xff"):
         width, height = _jpeg_size(data)
+        if width <= 0 or height <= 0 or b"\xff\xd9" not in data[2:]:
+            return None
         return "jpeg", width, height
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        if len(data) < 30 or int.from_bytes(data[4:8], "little") + 8 != len(data):
+            return None
         width, height = _webp_size(data)
+        if width <= 0 or height <= 0:
+            return None
         return "webp", width, height
     return None
 
@@ -649,6 +712,15 @@ def _evidence_line(lines: list[str], ref: str, section_start: int) -> int:
     return section_start + 1
 
 
+def _is_within(child: Path, parent: Path) -> bool:
+    """child 是否在 parent 目录之内（Python 3.9 兼容，不依赖 `Path.is_relative_to` 的边角行为）。"""
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def _check_evidence(path: Path, value: str, lines: list[str], fm_end: int,
                     decl_line: int) -> list[Finding]:
     """E8/E9：frontmatter 声明 `evidence:` 后，校验「迭代记录」里的图片真的存在、真的是图片。"""
@@ -658,15 +730,21 @@ def _check_evidence(path: Path, value: str, lines: list[str], fm_end: int,
                         f"frontmatter 的 `evidence` 声明「{value}」看不懂：写成 `evidence: 2 images`"
                         "（张数缺省 2，最大 20），需要最小尺寸就加 `min 32x32`；或者删掉这一行", decl_line)]
     count, min_w, min_h = decl
-    section = _evidence_section(lines, fm_end)
-    if section is None:
+    sections = _evidence_sections(lines, fm_end)
+    if not sections:
         return [Finding("ERROR", "E8",
                         "frontmatter 声明了 `evidence`，但正文没有「迭代记录 / 自检」章节；"
                         "把每轮实测截图与自检结论写进一个 `## 迭代记录` 段落，图片用相对路径引用"
                         "（例如 `![第 1 轮](shots/iter-1.png)`）", decl_line)]
-    section_text, section_start = section
+    section_text = "\n".join(_strip_fenced(text) for text, _start in sections)
+    section_start = sections[0][1]
     findings: list[Finding] = []
     valid = 0
+    seen_paths: set[str] = set()
+    try:
+        base_resolved = path.parent.resolve()
+    except OSError:  # pragma: no cover - 目录都读不到时下面的 is_file 会先报 E9
+        base_resolved = path.parent
     for ref in _evidence_refs(section_text):
         line_no = _evidence_line(lines, ref, section_start)
         if ref.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", ref):
@@ -686,10 +764,27 @@ def _check_evidence(path: Path, value: str, lines: list[str], fm_end: int,
                                     f"迭代证据引用的图片不存在：`{ref}`（按 SKILL.md 所在目录解析；"
                                     "文本里写个路径不算证据，要么补图、要么删掉）", line_no))
             continue
+        # 第 9 轮独立验证 V9-PF-09：`../outside.png` 以前能解析到技能目录外、照样算证据。
+        # 迭代证据必须是**本技能目录内**的文件（含链接解析后仍在目录内）。
+        try:
+            resolved = image_path.resolve()
+        except OSError:  # pragma: no cover
+            resolved = image_path.absolute()
+        if not _is_within(resolved, base_resolved):
+            findings.append(Finding("ERROR", "E9",
+                                    f"迭代证据里的图片路径不能指向 SKILL.md 目录之外：`{ref}`"
+                                    "（`../` 或链接跳到目录外不算本技能的迭代证据）", line_no))
+            continue
+        # 第 9 轮独立验证 V9-PF-10：同一张图换种写法（`./a.png` / `a.png` / `a\\a.png`）
+        # 旧版各算一张，声明 2 张只放一张也能过；按解析后的真实路径去重，只算一张。
+        key = os.path.normcase(str(resolved))
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
         info = _image_info(image_path.read_bytes())
         if info is None:
             findings.append(Finding("ERROR", "E9",
-                                    f"迭代证据里的文件不是真正的图片：`{ref}`（扩展名对但魔数不对，"
+                                    f"迭代证据里的文件不是真正的图片：`{ref}`（扩展名对但魔数/结构不对，"
                                     "改扩展名不算证据）", line_no))
             continue
         _, width, height = info
@@ -1539,6 +1634,46 @@ def selftest() -> int:
     evidence_case("evidence 声明看不懂（写成一句话）", "请给两张图", good_evidence, real_pngs, {"E8"})
     evidence_case("未声明 evidence 时完全不查（伪造路径也不报）", None,
                   "## 迭代记录\n\n![随便](shots/not-there.png)\n", {}, set())
+
+    # —— 第 9 轮独立验证：构造坏输入把证据闸门的绕过面钉进自测 ——
+    evidence_case("同一张图换种写法重复写只算一张（不能凑够张数）", "2 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/iter-1.png)\n"
+                  "![第 1 轮](<./shots/iter-1.png>)\n",
+                  {"shots/iter-1.png": png_bytes()}, {"E8"})
+    evidence_case("图片路径 ../ 越界到技能目录之外不算证据", "2 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/iter-1.png)\n"
+                  "![第 2 轮](../outside.png)\n",
+                  {"shots/iter-1.png": png_bytes(), "../outside.png": png_bytes()},
+                  {"E8", "E9"})
+    evidence_case("伪 JPEG（只有 3 字节 SOI 魔数）不算真图", "1 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/a.jpg)\n",
+                  {"shots/a.jpg": b"\xff\xd8\xff"}, {"E8", "E9"})
+    evidence_case("伪 WebP（12 字节 RIFF/WEBP 头）不算真图", "1 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/a.webp)\n",
+                  {"shots/a.webp": b"RIFF\x00\x00\x00\x00WEBP"}, {"E8", "E9"})
+    evidence_case("伪 PNG（签名 + 16 个零字节）不算真图", "1 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/a.png)\n",
+                  {"shots/a.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 16}, {"E8", "E9"})
+    evidence_case("PNG 只有 IHDR 没有 IDAT/IEND（截断）不算真图", "1 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/a.png)\n",
+                  {"shots/a.png": (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+                                   + struct.pack(">IIBBBBB", 100, 100, 8, 2, 0, 0, 0)
+                                   + b"\x00\x00\x00\x00")},
+                  {"E8", "E9"})
+    evidence_case("真 PNG 被截断（只有前 40 字节）不算真图", "1 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/a.png)\n",
+                  {"shots/a.png": png_bytes()[:40]}, {"E8", "E9"})
+    evidence_case("空的「自检」章节在前、带图的「迭代记录」在后仍算合规", "2 images",
+                  "## 自检\n\n- 两张图都能打开。\n\n" + good_evidence, real_pngs, set())
+    evidence_case("围栏代码块里的示例图片路径不算本轮证据", "2 images",
+                  "## 迭代记录\n\n```text\n"
+                  "![第 1 轮](shots/iter-1.png)\n![第 2 轮](shots/iter-2.png)\n```\n",
+                  real_pngs, {"E8"})
+    evidence_case("声明写成「截图 2 张」（数量在名词后）也要认", "截图 2 张",
+                  good_evidence, real_pngs, set())
+    evidence_case("min 只写宽不写高（min 32x0）看不懂，报 E8", "2 images min 32x0",
+                  good_evidence, real_pngs, {"E8"})
+    evidence_case("min 0x0 无意义，报 E8", "2 images min 0x0", good_evidence, real_pngs, {"E8"})
     findings = evidence_skill("2 images", good_evidence, real_pngs)
     lines = [f.line for f in findings]
     ok = not findings and not lines

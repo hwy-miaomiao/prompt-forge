@@ -273,14 +273,14 @@ python scripts/check.py <输出目录>
 | `check_prompt.py` | **0 ERROR**（WARN 可接受，但要逐条说明） |
 | `python scripts/check_prompt.py --selftest` | 正例 0 ERROR、反例 ≥5 ERROR、`templates/提示词骨架.md` 也是 **0 ERROR 0 WARN**；120 个用例全过（5 个真实文件 + 115 个内置回归；改了脚本 / 示例 / 模板必须重跑） |
 | `check_skill.py <SKILL.md>` | **0 ERROR**（检查本技能自己的定义：name 与目录名一致、description 能在 500 字内被自动识别、正文写了分诊与默认档；改 `SKILL.md` 后必须重跑） |
-| `python scripts/check_skill.py --selftest` | 仓库里真实的 `SKILL.md` 0 ERROR、每个反例用例报出的 ERROR 码与预期一致；76 个用例全过（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑，只有两者都建不了的环境才 SKIP；含 12 条迭代证据用例与 1 条独立分发用例） |
+| `python scripts/check_skill.py --selftest` | 仓库里真实的 `SKILL.md` 0 ERROR、每个反例用例报出的 ERROR 码与预期一致；88 个用例全过（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑，只有两者都建不了的环境才 SKIP；含 24 条迭代证据用例与 1 条独立分发用例） |
 | `check_contract.py` | **0 ERROR**（跨段一致性：C1 引用了不存在的编号、C3 未确认没人接、C2/C4/C5 是 WARN、C6 是 ERROR；段落齐不齐归闸门① 管） |
 | `python scripts/check_contract.py --selftest` | 57 个用例 + 2 个 `--no-ignore` 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例全过（65 PASS） |
-| `python scripts/mutate_checks.py` | 把闸门源码改坏 86 处，每一处都必须让对应的 `--selftest` 变红；基线必须先是绿的。自测空跑过一次（踩坑记录 #29），这一步就是防它再空跑 |
+| `python scripts/mutate_checks.py` | 把闸门源码改坏 96 处，每一处都必须让对应的 `--selftest` 变红；基线必须先是绿的。自测空跑过一次（踩坑记录 #29），这一步就是防它再空跑 |
 | `check_confirm.py` | **0 ERROR**（过程记录：三态判定、五步证据链、问询模式、每题的方法来源与「落到哪一段」；D0~D10 是 ERROR，D11/D12 是 WARN。D5 是**黑名单启发式**：只能拦常见空话、不能穷举，证据行仍须人工复核） |
-| `python scripts/check_confirm.py --selftest` | 65 个用例 + 2 个 `--no-ignore` 用例 + 1 个模板负例全过（68 PASS；内置正例、每个 ERROR 码至少一个反例；改了模板 / 样例 / 脚本必须重跑） |
+| `python scripts/check_confirm.py --selftest` | 71 个用例 + 2 个 `--no-ignore` 用例 + 1 个模板负例全过（74 PASS；内置正例、每个 ERROR 码至少一个反例；改了模板 / 样例 / 脚本必须重跑） |
 | `python scripts/pick_methods.py --selftest` | 14 个检查全过（方法库 id 唯一、形态/缺口/风险映射、文本与 JSON 输出） |
-| `python scripts/check.py <文件或目录>` | **0 ERROR**（只对传给它的目标跑该跑的闸门；`--strict` 让 WARN 也非零退出、`--json` 给机器读、`--selftest` 26 个用例） |
+| `python scripts/check.py <文件或目录>` | **0 ERROR**（只对传给它的目标跑该跑的闸门；`--strict` 让 WARN 也非零退出、`--json` 给机器读、`--selftest` 32 个用例；认不出类型的文件报 `E0` 而不是静默放行，目录递归遇到 junction / 符号链接不跟进，缺路径时 rc=2 且 `--json` 仍是纯 JSON） |
 | `python scripts/check_prompt.py <文件> --no-ignore`、`python scripts/check_contract.py <文件> --no-ignore`、`python scripts/check_confirm.py <文件> --no-ignore` | 无视 `<!-- pf-ignore: W码 理由 -->` 豁免注释，把 WARN 全列出来（复核豁免得对不对时用） |
 
 脚本一律：**发现问题就非零退出并打印 `ERROR: ...` 行**，不要静默通过。
