@@ -29,14 +29,18 @@ python scripts/check_prompt.py --selftest
 
 上面四个文件验的是**长提示词**；[`技能定义/`](技能定义/README.md) 验的是**这个技能自己的定义**
 能不能被宿主自动识别 —— 名字合不合规、描述里有没有"何时该用 / 何时不该用"、
-薄包装有没有把同目录的规范一起带上。9 个目录（1 正 8 反）+ 每个的预期 ERROR/WARN 码见
-[`技能定义/README.md`](技能定义/README.md)。
+薄包装有没有把同目录的规范一起带上。11 个目录（2 正 9 反）+ 每个的预期 ERROR/WARN 码见
+[`技能定义/README.md`](技能定义/README.md)。其中 `evidence-images/` 与 `evidence-fake/`
+是第 9 轮新增的「迭代证据」一正一反：声明 `evidence: 2 images` 后，正文迭代记录里必须引用
+真实存在、魔数正确的 PNG/JPEG/WebP 相对路径（细节见 `references/校验清单.md` 闸门② 的迭代证据约定）。
 
 ```bash
 python scripts/check_skill.py --selftest
 # PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
 # PASS  [示例] good-minimal: ERROR [] WARN []（期望 ERROR [] WARN []）
-# ... 其余 8 个反例逐个 PASS，最后 `自测结果：全部通过`
+# PASS  [示例] evidence-images: ERROR [] WARN []（期望 ERROR [] WARN []）
+# PASS  [示例] evidence-fake: ERROR ['E8', 'E9'] WARN []（期望 ERROR ['E8', 'E9'] WARN []）
+# ... 其余 8 个反例逐个 PASS，最后 `自测结果：全部通过`（共 76 个用例）
 ```
 
 ## 还有一组：`examples/需求确认/`（闸门④的夹具）
@@ -52,7 +56,7 @@ python scripts/check_skill.py --selftest
 ```bash
 python scripts/check_confirm.py "examples/需求确认/例1-下载文件夹整理.需求确认.md"
 # 结果：0 ERROR, 0 WARN —— 通过
-python scripts/check_confirm.py --selftest   # 36 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例
+python scripts/check_confirm.py --selftest   # 65 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（68 PASS）
 ```
 
 ## 这些文件还要过闸门③（跨段一致性）
@@ -61,7 +65,8 @@ python scripts/check_confirm.py --selftest   # 36 个用例 + 2 个 --no-ignore 
 三条正例与 `templates/提示词骨架.md` 都是 **0 ERROR 0 WARN**（第 9 段的步骤写了 `（对应 R#）`、
 第 10 段的 `未确认` 在第 11 段有对应的停下条件）。反例那边闸门③ 会打印一句范围说明
 （这份文件没有可认的第 9 段，`C2` 无从检查；段落缺失归闸门① 报 `E1`）并照常通过 —— 反例本来就不是靠闸门③ 拦的。
-CI 会拿三个正例 + 骨架 + 闸门④ 正例实跑一遍，并检查两份反例都被拦下（见仓库根的 `.github/workflows/ci.yml`）。
+CI 会拿三个正例 + 骨架 + 闸门④ 正例 + 两个 evidence 技能示例实跑一遍，并检查两份反例与两个技能反例都被拦下
+（见仓库根的 `.github/workflows/ci.yml`）；单入口 `python scripts/check.py examples` 一条命令能同时看到这些结果。
 
 ---
 

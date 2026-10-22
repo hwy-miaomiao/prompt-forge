@@ -203,7 +203,14 @@ _CODE_SPAN_REF_RE = re.compile(r"[RA]\d+(?:\s*[、,，/\\和及与]\s*[RA]\d+)*"
 _PAPER_CONTEXT_BEFORE_RE = re.compile(
     r"(?:"
     + "|".join(re.escape(word) for word in sorted(_PAPER_SPEC_WORDS, key=len, reverse=True))
-    + r")[^。；\n]{0,8}$"
+    + r")([^。；\n]{0,8})$"
+)
+#: 前置窗口里出现引用信号时，这个编号是**引用**不是纸张规格。
+#: 第 8 轮 R8-01 把豁免扩到正文后窗口给到 8 个字，于是「纸张大小见下，验收按 A0 编号」里的 A0
+#: 被静默吞成规格、C1 不报（第 9 轮审计 N2）。只否决议论/引用语，不否决标点：`纸张规格 A4、A3`
+#: 这种列举里的编号仍是规格（同一句话里的多个规格）。
+_PAPER_CONTEXT_STOP_RE = re.compile(
+    r"验收|编号|对应|引用|需求|见(?:第|下|上|附|图|表|前|后)"
 )
 
 
@@ -220,10 +227,11 @@ def _missing_ref(letter: str, num: int, line_no: int) -> cp.Finding:
 
 def _paper_spec_near(text: str, start: int, end: int) -> bool:
     """这个 A 系列编号是不是纸张规格：`A4 尺寸`（后置词）或 `页面规格写 `A4``（前置词）。"""
-    return bool(
-        _PAPER_SPEC_TAIL_RE.match(text[end:])
-        or _PAPER_CONTEXT_BEFORE_RE.search(text[:start])
-    )
+    if _PAPER_SPEC_TAIL_RE.match(text[end:]):
+        return True
+    match = _PAPER_CONTEXT_BEFORE_RE.search(text[:start])
+    # 第 9 轮审计 N2：窗口跨了逗号/验收信号时，「纸张词…，验收按 A0」是在引用编号，不是规格。
+    return bool(match and not _PAPER_CONTEXT_STOP_RE.search(match.group(1)))
 
 
 def check_refs(
@@ -723,6 +731,20 @@ def selftest() -> int:
          lambda: sub(base, "## 6. 技术约束",
                      "## 6. 技术约束\n\n- 验收按 A4 的编号走，`A4` 是旧版编号。"),
          {"C1"}, set(), set(), ""),
+        # 第 9 轮审计 N2：前置窗口不能跨「见下/验收」这类引用语，否则真引用被吞成纸张规格。
+        ("C1 纸张词后跨「见下，验收按」不再算规格（第 9 轮 N2）",
+         lambda: sub(base, "## 6. 技术约束",
+                     "## 6. 技术约束\n\n- 打印纸张大小见下，验收按 A0 编号执行。"),
+         {"C1"}, set(), set(), ""),
+        ("C1 纸张词后跨「见附录」不再算规格（第 9 轮 N2 变体）",
+         lambda: sub(base, "## 6. 技术约束",
+                     "## 6. 技术约束\n\n- 打印纸张大小见附录，A0 是旧版验收编号。"),
+         {"C1"}, set(), set(), ""),
+        # N2 反向：同一句话里列举多个纸张规格（冒号/括号/顿号）仍要豁免，别把闸门改出假红。
+        ("C1 同一句话里列举多个纸张规格仍豁免（第 9 轮 N2 反向）",
+         lambda: sub(base, "## 6. 技术约束",
+                     "## 6. 技术约束\n\n- 打印纸张规格：A4、A3；封面纸张大小（A2）。"),
+         set(), set(), set(), ""),
         ("C3/C4「无未确认项」是否定句，不算未确认（第 11 段写「无」也不报 C3）",
          lambda: sub(sub(base,
                          "- 假设表头在第 1 行（未确认：若表头在第 2 行要改 header 参数）。",

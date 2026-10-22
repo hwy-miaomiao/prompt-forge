@@ -4,12 +4,14 @@
 
 ```bash
 python scripts/check_skill.py examples/技能定义/*/SKILL.md   # 逐个扫（bash/zsh 会展开通配符）
-python scripts/check_skill.py --selftest                     # 自测：仓库 SKILL.md + 内置反例 + 下面这 9 个
+python scripts/check.py examples/技能定义                     # 单入口目录模式：一条命令看全部（含汇总与退出码）
+python scripts/check_skill.py --selftest                     # 自测：仓库 SKILL.md + 内置反例 + 下面这 11 个
 ```
 
 | 目录 | 预期 ERROR | 预期 WARN | 它演示的是什么 |
 | --- | --- | --- | --- |
 | `good-minimal/` | —— | —— | **正例**：自足技能（规范写在自己正文里），只查 frontmatter 与描述 |
+| `evidence-images/` | —— | —— | **正例**：声明 `evidence: 2 images` 且迭代记录里两张 PNG 都真实存在（第 9 轮新增） |
 | `missing-siblings/` | `E7` | —— | 薄包装只拷了 `SKILL.md`：正文引用了同目录的 `AGENTS.md` / `references/` / 闸门脚本，它们却不在 |
 | `oversize-description/` | `E4` | `W1` | 描述 1648 字符：超过规范上限 1024，也超过宿主只渲染的前 500 |
 | `Bad-Name/` | `E2` | —— | `name` 不是 kebab-case（大写） |
@@ -18,9 +20,19 @@ python scripts/check_skill.py --selftest                     # 自测：仓库 S
 | `no-trigger/` | `E5` | `W2` | 描述只写"这个技能做 X"，没有"何时该用"，也不是祈使句 |
 | `no-boundary/` | `E6` | —— | 描述没有"何时不该用"的边界（过宽 = 在不该触发时触发） |
 | `boundary-after-500/` | `E6` | `W1` | 边界写了，但写在第 500 字之后：只渲染前 500 字的宿主看不到 |
+| `evidence-fake/` | `E8` + `E9` | —— | **反例**：声明了 `evidence: 2 images`，迭代记录里的两个路径指向不存在的文件（伪造证据，第 9 轮新增） |
 
-`--selftest` 里这 9 个用例的期望值**硬编码在 `scripts/check_skill.py` 的 `selftest()` 里**，
+`--selftest` 里这 11 个用例的期望值**硬编码在 `scripts/check_skill.py` 的 `selftest()` 里**，
 并且做了覆盖检查：往这个目录新增一个带 `SKILL.md` 的示例却没登记，自测会直接 FAIL。
+
+## 迭代证据：`evidence:` 声明（第 9 轮新增，可选）
+
+`evidence-images/` 与 `evidence-fake/` 演示同一条约定：技能在 frontmatter 写 `evidence: 2 images`
+（可写成 `3 images min 400x300` 追加最小尺寸），正文就必须有一个「迭代记录 / 迭代日志 / 自检」章节，
+里面用**相对 `SKILL.md` 目录**的路径引用至少 N 张真图（PNG / JPEG / WebP；闸门会读文件头魔数，
+文本改名成 `.png` 也会被拦）。`evidence-fake/` 声明了但两张图都不存在 → `E8` + `E9`。
+不声明 `evidence:` 的技能（本目录其余 9 个）完全不受这条检查影响。完整口径见
+[`references/校验清单.md`](../../references/校验清单.md) 闸门② 的「迭代证据约定」。
 
 ## 三个容易踩的地方
 
@@ -50,6 +62,8 @@ W3 的标记词按**词边界**匹配（写 `good` 不会被当成写了 `go`）
 PASS  [示例] Bad-Name: ERROR ['E2'] WARN []（期望 ERROR ['E2'] WARN []）
 PASS  [示例] boundary-after-500: ERROR ['E6'] WARN ['W1']（期望 ERROR ['E6'] WARN ['W1']）
 PASS  [示例] dir-mismatch: ERROR ['E3'] WARN []（期望 ERROR ['E3'] WARN []）
+PASS  [示例] evidence-fake: ERROR ['E8', 'E9'] WARN []（期望 ERROR ['E8', 'E9'] WARN []）
+PASS  [示例] evidence-images: ERROR [] WARN []（期望 ERROR [] WARN []）
 PASS  [示例] good-minimal: ERROR [] WARN []（期望 ERROR [] WARN []）
 PASS  [示例] missing-siblings: ERROR ['E7'] WARN []（期望 ERROR ['E7'] WARN []）
 PASS  [示例] no-boundary: ERROR ['E6'] WARN []（期望 ERROR ['E6'] WARN []）

@@ -12,13 +12,18 @@
 再交给 SDD 流程去拆任务、写代码。
 
 **同名项目说明：** GitHub 上另有一个 `insaaniManav/prompt-forge`（Go 写的提示词工程工作台，与本项目无关）；
-本仓库作者是 hwy-miaomiao，产物是 `prompt.md` + `需求确认.md`，四道零依赖闸门在 `scripts/` 下。
+本仓库作者是 hwy-miaomiao，产物是 `prompt.md` + `需求确认.md`，四道零依赖闸门（外加一个单入口
+`scripts/check.py`）在 `scripts/` 下。
 
 大多数人用 AI 的方式是：一句话丢过去 → AI 猜 → 出来的东西不对 → 再吵三轮。
 问题不在 AI 的能力，在于**需求从没被说清楚过**：没有交付物路径、没有验收口径、没有边界、
 没有"什么算做完"。prompt-forge 把"说清楚"这件事做成了一套可执行的流程：
 
 > 任意一句需求 → **自动分诊**（该接就接，不该接就一句话说清理由）→ 一轮带推荐项与参考选项的问询（优先 ≤5 题，最多 9 题）→ 一份「写多厚」的扩充菜单（每项自带默认档）→ 12 段结构的长提示词 → 闸门①、③、④ 0 ERROR → 交付。
+
+写完之后不用记四条命令：`python scripts/check.py <文件或目录>` 自动识别目标、把对应的闸门各跑一遍，
+给出一张统一汇总表与统一退出码（`--json` 可直接接 CI）—— 这是本仓库对 spec-kit / OpenSpec 那种
+「一条命令跑完整流程」的回应，区别是这里的每一步都是**离线、确定性**的静态闸门。
 
 **不用背触发词。** 它不靠「帮我做个 X」这类固定句式触发：宿主把技能的 `name` + `description`
 交给模型，模型按语义判断这次输入该不该用它。所以描述里同时写清了"什么时候该用"和"什么时候不该用" ——
@@ -54,7 +59,7 @@ flowchart LR
     F -->|0 ERROR| G[阶段5 交付<br/>全文 + 路径 + 最可能返工的三处]
 ```
 
-八个关键设计：
+九个关键设计：
 1. **不用背触发词**：唯一的路由面是 `SKILL.md` 的 `description`，模型按语义判断要不要用它；
    接住之后的第一件事是**把判断说出口** —— 接（`go`）/ 先问一句（`needs-clarification`）/ 不接（`kill`），
    三态沿用 GitHub spec-kit 的说法。判据三条：有没有能落下来的交付物、是不是一次任务级的活、
@@ -68,11 +73,16 @@ flowchart LR
 5. **提示词是给陌生人看的**：把本次对话全删掉，另一个 AI 只读这个文件也要能开工。
 6. **每条规矩都标出处**：`references/方法论出处.md` 里逐条写明是官方文档、行业标准，还是本仓库自己的设计选择 —— 哪些是抄的、哪些是拍的，一目了然。
 7. **闸门自己也被检验**：四道闸门都是零依赖脚本，`--selftest` 拿真实正反例跑；另有 `scripts/mutate_checks.py`
-   把闸门源码改坏 78 处，每一处都必须让对应的自测变红 —— 防的是"自测空跑、看着全绿其实什么都没查"。
+   把闸门源码改坏 86 处，每一处都必须让对应的自测变红 —— 防的是"自测空跑、看着全绿其实什么都没查"。
 8. **过程记录也过闸门**：分诊三态、五步证据链（intake → research → define → shape → decide）、问询模式、
    每道题的方法来源与「落到 prompt.md 哪一段」的追溯都写进 `需求确认.md`，闸门④ 逐项校验；
    问询也不再靠临场想 —— `references/需求问询-方法映射.md` 与 `scripts/pick_methods.py`
    按需求形态与缺口给出带默认档的方法清单。
+9. **单入口 + 迭代证据可验证**：`scripts/check.py` 一条命令自动识别 `.prompt.md` / 需求确认文档 /
+   `SKILL.md`（或技能目录），按目标依次调用对应闸门，输出统一汇总表、统一退出码，`--json` 可直接接 CI
+   —— 对标 spec-kit / OpenSpec 的「一条命令跑完整流程」，但这里是离线、确定性的静态闸门；
+   技能还能在 frontmatter 写 `evidence: 2 images`，闸门② 就会去「迭代记录」章节验证图片路径真实存在、
+   魔数正确、尺寸够 —— 把「代理真的看过/做过」变成机器能判的事。
 
 
 ## 快速开始
@@ -96,9 +106,14 @@ cd prompt-forge
 让 AI 编程工具打开这个目录，它会先读 [`AGENTS.md`](AGENTS.md)，然后照阶段执行。
 克隆用法下的产物落在 `输出/<slug>/`。
 
-**先验一下四道闸门与问询方法库都是好的**：
+**先验一下四道闸门、单入口与问询方法库都是好的**：
 
 ```bash
+# 单入口：自动识别目标（.prompt.md / 需求确认 / SKILL.md），把对应闸门各跑一遍
+python scripts/check.py --selftest
+# …… 26 个用例：分类口径（文件名优先、正文特征兜底）、合格资产 0 ERROR、
+#      4 份反例被拦（16 / 10 / 3 / 1 ERROR）、--json 结构、退出码口径、目录模式、真 CLI 子进程
+
 # 闸门①：检查产出的长提示词本身（12 段契约）
 python scripts/check_prompt.py --selftest
 # PASS  例1-下载文件夹整理.prompt.md: 0 ERROR（期望 0 ERROR）
@@ -119,28 +134,29 @@ python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 # PASS  SKILL.md: 0 ERROR（期望 0 ERROR）
 # PASS  [闸门] 正例夹具: ERROR 码 []（期望 []）
-# …… 共 61 个用例（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑；
-#      两者都建不了的环境会 SKIP，不算失败）
-#      = 真实 SKILL.md + 9 个真实示例 + 51 个内置闸门用例（含行号、BOM、长句触发、
-#      `go` 不被 `good` / `Go 语言` 命中、「不接（kill）」不算写了「接」、
-#      W5 写了「用户可以不选」不报、只写默认档仍报等）
+# …… 共 76 个用例（真实 SKILL.md + 11 个真实示例 + 内置闸门用例；其中 11 条是迭代证据回归、
+#      1 条验证「单独分发 check_skill.py 也能跑」；2 个目录链接用例在 Linux 用符号链接、
+#      Windows 用 junction 真跑，两者都建不了的环境会 SKIP，不算失败）
+#      内置用例含行号、BOM、长句触发、`go` 不被 `good` / `Go 语言` 命中、
+#      「不接（kill）」不算写了「接」、W5 写了「用户可以不选」不报、只写默认档仍报等
 
 # 闸门③：检查段与段之间对不对得上（需求↔步骤、未确认↔停下条件、判定↔命令）
 python scripts/check_contract.py --selftest
 # PASS  [闸门③] 基准件：闸门① 的自测夹具跨段也对得上: ERROR 码 []（期望 []） WARN 码 []（期望 []）
 # PASS  [闸门③] C1 引用了不存在的需求号: ERROR 码 ['C1']（期望 ['C1']） WARN 码 []（期望 []）
-# …… 共 54 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例
-#      （C1/C3 是 ERROR，C2/C4/C5 是 WARN；最后两条是「范围说明」用例：没东西可查 / 有需求但缺第 9 段、C2 无从检查）
+# …… 共 57 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例
+#      （合计 65 条 PASS；C1/C3/C6 是 ERROR，C2/C4/C5 是 WARN；最后两条是「范围说明」用例：
+#      没东西可查 / 有需求但缺第 9 段、C2 无从检查）
 
 # 闸门④：检查需求确认.md（过程记录：三态 / 五步证据链 / 问询模式 / 方法来源 / 追溯）
 python scripts/check_confirm.py --selftest
-# …… 共 56 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（模板原样提交必须被拦）
+# …… 共 65 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（合计 68 条 PASS；模板原样提交必须被拦）
 
 # 问询方法库：按需求形态与缺口维度给带默认档的方法清单
 python scripts/pick_methods.py --selftest
 # …… 14 个检查
 
-# 变异检验：把闸门源码改坏 78 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
+# 变异检验：把闸门源码改坏 86 处，每一处都必须让对应的自测变红（自测空跑过一次，见踩坑记录 #29）
 python scripts/mutate_checks.py
 ```
 
@@ -216,7 +232,7 @@ python scripts/check_prompt.py <输出目录>/prompt.md
 
 ```bash
 python scripts/check_skill.py SKILL.md
-python scripts/check_skill.py --selftest   # 61 个用例（2 个链接安装用例：Linux 符号链接 / Windows junction 真跑；两者都建不了的环境会 SKIP）
+python scripts/check_skill.py --selftest   # 76 个用例（真实 SKILL.md + 11 个真实示例 + 内置用例；2 个链接安装用例：Linux 符号链接 / Windows junction 真跑，两者都建不了的环境会 SKIP）
 ```
 
 查的是「自动识别」这件事能不能成立：
@@ -231,7 +247,13 @@ python scripts/check_skill.py --selftest   # 61 个用例（2 个链接安装用
   但「描述里要写清何时该用 / 何时不该用」对**任何**技能都查（这是官方判据，不是家规）；
 - 正文**引用**的 `AGENTS.md` / `references/` / `scripts/check_prompt.py` 是否真的都在同目录
   （只拷 `SKILL.md` 是最常见的安装事故）。只有"同目录"才算数：`../AGENTS.md`、绝对路径不算缺件，
-  而且只查**被引用的**那几个路径。
+  而且只查**被引用的**那几个路径；
+- **迭代证据**（第 9 轮新增，`E8`/`E9`）：frontmatter 可选声明 `evidence: 2 images`（可加 `min 32x32`），
+  声明后正文必须有「迭代记录 / 自检」章节，里面写至少 N 个**真实存在**的图片相对路径（相对 `SKILL.md`
+  所在目录）：路径不存在、扩展名不在 PNG/JPEG/WebP 白名单、文件魔数对不上（文本改名成 `.png`）、
+  尺寸不达标都报 `E9`；声明看不懂或数量不够报 `E8`。**没声明 `evidence:` 的技能完全不受影响** ——
+  这条只服务「愿意把看过/做过写成证据」的技能，示例见 `examples/技能定义/evidence-images/`
+  与反例 `examples/技能定义/evidence-fake/`。约定写进 [`references/校验清单.md`](references/校验清单.md) 的闸门② 一节。
 
 **为什么要专门有一道闸门**：技能定义写错往往**没有报错**。有的宿主只打一条 warning，模型侧
 什么诊断都收不到，表现为"这个技能好像没装"。闸门②把它变成一个会红的东西。
@@ -240,7 +262,7 @@ python scripts/check_skill.py --selftest   # 61 个用例（2 个链接安装用
 
 ```bash
 python scripts/check_contract.py <输出目录>/prompt.md
-python scripts/check_contract.py --selftest   # 54 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例
+python scripts/check_contract.py --selftest   # 57 个用例 + 2 个 --no-ignore 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例（合计 65 条 PASS）
 ```
 
 段落本身写得对（那是闸门① 的活）不等于**段与段对得上**：
@@ -258,7 +280,7 @@ python scripts/check_contract.py --selftest   # 54 个用例 + 2 个 --no-ignore
 
 ```bash
 python scripts/check_confirm.py <输出目录>/需求确认.md
-python scripts/check_confirm.py --selftest   # 56 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例
+python scripts/check_confirm.py --selftest   # 65 个用例 + 2 个 --no-ignore 用例 + 1 个模板负例（合计 68 条 PASS）
 ```
 
 查的是分诊三态、五步证据链（intake → research → define → shape → decide，每步要有证据词）、
@@ -271,11 +293,29 @@ python scripts/check_confirm.py --selftest   # 56 个用例 + 2 个 --no-ignore 
 码写错或格式不对也报 `E11`；用 `--no-ignore` 可以看到被豁免的全部条目。
 豁免是例外而非常态：默认做法是改掉它。
 
+**单入口：一条命令跑完该跑的门**
+
+```bash
+python scripts/check.py <输出目录>/prompt.md      # 自动：闸门① + 闸门③
+python scripts/check.py <输出目录>/需求确认.md    # 自动：闸门④
+python scripts/check.py SKILL.md                  # 自动：闸门②
+python scripts/check.py examples                  # 目录：递归找 .prompt.md / 需求确认 / SKILL.md
+python scripts/check.py --strict --json <文件>    # WARN 也算失败；机器可读输出
+```
+
+识别规则：`SKILL.md` 或含 `SKILL.md` 的目录 → 闸门②；文件名含「需求确认」、或正文有
+「目标体检 / 问询与拍板 / 分诊结论 / 证据链（intake…）」→ 闸门④；`.prompt.md` 或其它 `.md` → 闸门① + ③。
+既有四个脚本的独立 CLI 行为不变：`check.py` 只是按目标把它们各调一遍，判据只有一份。
+退出码：有 ERROR → 1；只有 WARN → 0（`--strict` 时 1）；路径不存在或用法错 → 2。
+对标的竞品是 spec-kit / OpenSpec 的「一条命令跑完整流程」，差异是**离线、零依赖、确定性**：
+不调模型、不联网、同一份文件永远同样的输出，适合直接接 CI 或 pre-commit。
+
 **这四道闸门、方法库与那个变异检验都在 CI 里跑**
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 里，Python 3.9 与 3.12 两头都跑一遍
-（五份 `--selftest`：四个闸门 + `pick_methods.py`，再加 `mutate_checks.py`），另外还检查三件仓库级的事：
-本仓库自己的资产（三个正例、提示词骨架、`SKILL.md`、闸门④ 正例）必须过闸门、两份反例（闸门① 与闸门④）与需求确认占位模板必须被拦下、仓库文本必须是 LF。
+（六份 `--selftest`：四个闸门 + `pick_methods.py` + 单入口 `check.py`，再加 `mutate_checks.py`），另外还检查三件仓库级的事：
+本仓库自己的资产（三个正例、提示词骨架、`SKILL.md`、闸门④ 正例、两个带 `evidence:` 的技能示例）必须过闸门、
+两份反例（闸门① 与闸门④）与两个技能反例及需求确认占位模板必须被拦下、仓库文本必须是 LF。
 
 **闸门①、③、④ 0 ERROR 才允许交付**；WARN 要逐条说明为什么不影响执行。
 机器只管结构，需求对不对仍然要靠问询与人工复核 —— 闸门是拦低级错误的，不是质量保证。
@@ -290,10 +330,11 @@ prompt-forge/
 ├── README.md
 ├── README.en.md         # 英文说明（与 README.md 互链）
 ├── CHANGELOG.md         # 更新日志
-├── .github/workflows/   # CI：四道闸门 + 方法库自测 + 变异检验 + 仓库级检查（资产过闸门 / 两份反例被拦下 / 全 LF）
+├── .github/workflows/   # CI：六份自测（四道闸门 + 方法库 + 单入口）+ 变异检验 + 仓库级检查（资产过闸门 / 反例被拦下 / 全 LF）
 ├── references/          # 需求问询 · 需求问询-方法映射 · 参考样例库 · 提示词结构 · 模糊词换算表 · 校验清单 · 踩坑记录 · 方法论出处
 ├── templates/           # 提示词骨架 · 需求确认模板
 ├── scripts/
+│   ├── check.py          # 单入口：自动识别目标，依次调用对应闸门（--json / --strict / --selftest）
 │   ├── check_prompt.py   # 闸门①：检查产出的长提示词本身（含 --selftest）
 │   ├── check_skill.py    # 闸门②：检查本技能自己的定义能否被自动识别（含 --selftest）
 │   ├── check_contract.py # 闸门③：检查 12 段之间对不对得上（含 --selftest）
@@ -302,15 +343,16 @@ prompt-forge/
 │   └── mutate_checks.py  # 变异检验：把闸门源码改坏，自测必须变红
 ├── examples/            # 闸门①的正反例：三个正例 + 一个反例（正例必须过闸门）
 │   ├── 需求确认/         # 闸门④的正反例：1 正 1 反
-│   └── 技能定义/         # 闸门②的正反例：1 正 8 反，预期 ERROR/WARN 码见该目录 README
+│   └── 技能定义/         # 闸门②的正反例：2 正 9 反（含 evidence 合规/反例各一），预期 ERROR/WARN 码见该目录 README
 ├── 输出/                # 克隆用法下的产物目录（git 忽略）
 ```
 
 ## 常见问题
 
 **它需要联网吗？**
-不需要。全部是本地 Markdown 与五个零依赖 Python 脚本（`scripts/check_prompt.py`、`scripts/check_skill.py`、
-`scripts/check_contract.py`、`scripts/check_confirm.py`、`scripts/pick_methods.py`，Python ≥3.9）；联网只用于阶段 1 预调研时查资料。
+不需要。全部是本地 Markdown 与六个零依赖 Python 脚本（`scripts/check.py`、`scripts/check_prompt.py`、
+`scripts/check_skill.py`、`scripts/check_contract.py`、`scripts/check_confirm.py`、`scripts/pick_methods.py`，
+Python ≥3.9）；联网只用于阶段 1 预调研时查资料。
 `scripts/mutate_checks.py` 也只是把仓库复制到临时目录、把闸门源码改坏再跑一遍自测，同样不联网。
 
 **CI 红了怎么办？**
@@ -354,15 +396,18 @@ prompt-forge 的价值在于**流程约束**：先分诊、再问、给参考、
 欢迎提 Issue 与 PR：新的参考样例、新的需求形态题库、新的闸门检查项，或者一条你自己踩过的坑
 （`references/踩坑记录.md` 的格式是「症状 → 原因 → 正确做法」，照这个写就行）。
 
-改动 `scripts/*.py`、`templates/`、`SKILL.md`、`AGENTS.md`、`references/` 或 `examples/` 之后，请确保五份自测仍然全绿
+改动 `scripts/*.py`、`templates/`、`SKILL.md`、`AGENTS.md`、`references/` 或 `examples/` 之后，请确保六份自测仍然全绿
 （改过 `SKILL.md`、`AGENTS.md` 或 `references/` 还要单独跑 `check_skill.py`）：
 
 ```bash
+python scripts/check.py --selftest            # 单入口：四种目标都能识别并调对闸门
 python scripts/check_prompt.py --selftest
 python scripts/check_skill.py --selftest
 python scripts/check_contract.py --selftest
+python scripts/check_confirm.py --selftest
+python scripts/pick_methods.py --selftest
 python scripts/check_skill.py SKILL.md   # 改过 SKILL.md / AGENTS.md / references/ 之后要跑
-python scripts/mutate_checks.py     # 动了闸门源码就要跑：78 处变异必须全部被抓住
+python scripts/mutate_checks.py     # 动了闸门源码就要跑：86 处变异必须全部被抓住
 ```
 
 新增检查项时请补上反例，并且**先用真实文件跑一遍确认期望的 ERROR 码** —— 照直觉写期望值，
@@ -376,9 +421,12 @@ Windows 上不用装 Python：官方 embeddable 包解压就能跑（脚本零�
 ```powershell
 curl.exe -LO https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip
 Expand-Archive python-3.9.13-embed-amd64.zip -DestinationPath py39
+& .\py39\python.exe -X utf8 -B scripts\check.py --selftest
 & .\py39\python.exe -X utf8 -B scripts\check_prompt.py --selftest
 & .\py39\python.exe -X utf8 -B scripts\check_skill.py --selftest
 & .\py39\python.exe -X utf8 -B scripts\check_contract.py --selftest
+& .\py39\python.exe -X utf8 -B scripts\check_confirm.py --selftest
+& .\py39\python.exe -X utf8 -B scripts\pick_methods.py --selftest
 & .\py39\python.exe -X utf8 -B scripts\mutate_checks.py
 ```
 
@@ -392,10 +440,13 @@ sudo add-apt-repository -y ppa:deadsnakes/ppa
 sudo apt-get update && sudo apt-get install -y python3.9
 # 其他发行版：pyenv install 3.9.13（或 uv python install 3.9.13）
 
-# 装好后用 python3.9 跑这四条（与 CI 的 3.9 那一格等价；不在 PATH 时用安装包给的完整路径）
+# 装好后用 python3.9 跑这七条（与 CI 的 3.9 那一格等价；不在 PATH 时用安装包给的完整路径）
+python3.9 -X utf8 -B scripts/check.py --selftest
 python3.9 -X utf8 -B scripts/check_prompt.py --selftest
 python3.9 -X utf8 -B scripts/check_skill.py --selftest
 python3.9 -X utf8 -B scripts/check_contract.py --selftest
+python3.9 -X utf8 -B scripts/check_confirm.py --selftest
+python3.9 -X utf8 -B scripts/pick_methods.py --selftest
 python3.9 -X utf8 -B scripts/mutate_checks.py
 ```
 

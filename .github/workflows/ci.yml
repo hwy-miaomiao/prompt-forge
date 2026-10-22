@@ -1,6 +1,6 @@
 name: 闸门
 
-# 四道闸门的自测 + 仓库自家资产实跑 + 变异检验。
+# 六份自测（四道闸门 + 问询方法库 + 单入口 check.py）+ 仓库自家资产实跑 + 变异检验。
 # 最要紧的是「变异检验」那一步：把闸门源码里某一行改坏，如果自测还是全绿，说明那些自测是空跑的
 # （踩坑记录 #29），这时整个工作流必须失败 —— 光跑自测证明不了自测在看着代码。
 on:
@@ -33,13 +33,14 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: 四个闸门与问询方法库的自测
+      - name: 六份自测（四个闸门 + 问询方法库 + 单入口）
         run: |
           python -X utf8 -B scripts/check_prompt.py --selftest
           python -X utf8 -B scripts/check_skill.py --selftest
           python -X utf8 -B scripts/check_contract.py --selftest
           python -X utf8 -B scripts/check_confirm.py --selftest
           python -X utf8 -B scripts/pick_methods.py --selftest
+          python -X utf8 -B scripts/check.py --selftest
 
       - name: 变异检验（把闸门改坏，自测必须变红）
         run: python -X utf8 -B scripts/mutate_checks.py
@@ -57,7 +58,17 @@ jobs:
             "examples/例3-logsift-json-export.prompt.md" \
             "templates/提示词骨架.md"
           python -X utf8 -B scripts/check_skill.py SKILL.md
+          python -X utf8 -B scripts/check_skill.py "examples/技能定义/evidence-images/SKILL.md"
           python -X utf8 -B scripts/check_confirm.py "examples/需求确认/例1-下载文件夹整理.需求确认.md"
+
+      - name: 单入口 check.py 汇总（合格资产 0 ERROR、退出码 0）
+        run: |
+          # 第 9 轮新增：一条命令把「该跑的门」一次跑完（对标 spec-kit / OpenSpec 的 CLI 工作流）。
+          # 这里只喂合格资产：有 ERROR 就必须非零退出；反例走下面的负例步骤。
+          python -X utf8 -B scripts/check.py \
+            "examples/例1-下载文件夹整理.prompt.md" \
+            "examples/需求确认/例1-下载文件夹整理.需求确认.md" \
+            "examples/技能定义/evidence-images"
 
       - name: 反例必须被拦下（非零退出且输出里真的报 ERROR）
         run: |
@@ -96,6 +107,28 @@ jobs:
           echo "$out"
           if ! printf '%s\n' "$out" | grep -q 'ERROR'; then
             echo "::error::反例退出码 $rc，但输出里一条 ERROR 都没有 —— 不是闸门④ 判红的（文件缺失/脚本崩溃？）"
+            exit 1
+          fi
+
+      - name: 伪造迭代证据的技能示例必须被拦下（单入口非零退出且报 ERROR）
+        run: |
+          # 第 9 轮新增：声明了 evidence: 2 images 但正文引用的图片根本不存在，
+          # 迭代证据闸门必须报 E8/E9。这条负例就是「迭代证据不是靠嘴说」的证明。
+          ref="examples/技能定义/evidence-fake/SKILL.md"
+          if [ ! -f "$ref" ]; then
+            echo "::error::$ref 不存在 —— 这一步没法证明迭代证据闸门在拦东西"
+            exit 1
+          fi
+          if out=$(python -X utf8 -B scripts/check.py "$ref" 2>&1); then
+            echo "$out"
+            echo "::error::evidence-fake 竟然 0 ERROR 通过 —— 迭代证据闸门漏了"
+            exit 1
+          else
+            rc=$?
+          fi
+          echo "$out"
+          if ! printf '%s\n' "$out" | grep -q 'ERROR'; then
+            echo "::error::evidence-fake 退出码 $rc，但输出里一条 ERROR 都没有 —— 不是闸门② 判红的（文件缺失/脚本崩溃？）"
             exit 1
           fi
 

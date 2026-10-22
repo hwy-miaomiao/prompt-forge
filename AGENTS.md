@@ -49,19 +49,20 @@ prompt-forge/
 ├── CLAUDE.md            # 让 Claude Code 也读 AGENTS.md
 ├── README.md            # 给人看的说明
 ├── README.en.md         # 英文说明（与 README.md 互链）
-├── .github/workflows/   # CI：四个闸门 + 方法库的自测 + 变异检验 + 仓库级检查：资产过闸门 / 反例被拦下 / 全 LF（见第 5 节）
+├── .github/workflows/   # CI：六份自测（四闸门 + 方法库 + 单入口）+ 变异检验 + 仓库级检查：资产过闸门 / 反例被拦下 / 全 LF（见第 5 节）
 ├── references/          # 方法论：需求问询 / 需求问询-方法映射 / 提示词结构 / 参考样例库 / 模糊词换算表 / 校验清单 / 踩坑记录 / 方法论出处
 ├── templates/           # 提示词骨架、需求确认模板
 ├── scripts/
+│   ├── check.py          # 单入口：自动识别目标类型，跑该跑的那几道闸门（--json / --strict / --selftest）
 │   ├── check_prompt.py   # 闸门①：检查长提示词本身是否符合 12 段契约
-│   ├── check_skill.py    # 闸门②：检查本技能自己的定义（SKILL.md 能否被自动识别）
+│   ├── check_skill.py    # 闸门②：检查本技能自己的定义（SKILL.md 能否被自动识别；声明 evidence 时验迭代证据）
 │   ├── check_contract.py # 闸门③：检查 12 段之间对不对得上（需求↔步骤、未确认↔停下条件、判定↔命令）
 │   ├── check_confirm.py  # 闸门④：检查需求确认.md 的机器可读字段（三态 / 证据链 / 问询模式 / 追溯）
 │   ├── pick_methods.py   # 问询方法库 CLI：按需求形态与缺口维度给方法清单（带默认档）
 │   └── mutate_checks.py  # 变异检验：把闸门源码改坏，自测必须变红（证明自测不是空跑）
 ├── examples/            # 闸门①的正反例（正例必须过闸门）
 │   ├── 需求确认/         # 闸门④的正反例：1 正 1 反
-│   └── 技能定义/         # 闸门②的正反例：1 正 8 反，预期 ERROR/WARN 码见该目录 README
+│   └── 技能定义/         # 闸门②的正反例：2 正 9 反（含 evidence 合规 / 伪造各一），预期 ERROR/WARN 码见该目录 README
 └── 输出/                # 克隆用法下的产物目录（git 忽略）
 ```
 
@@ -188,6 +189,8 @@ constraints / context / audience / memory / success criteria / examples 九个�
 python scripts/check_prompt.py <输出目录>/prompt.md
 python scripts/check_contract.py <输出目录>/prompt.md
 python scripts/check_confirm.py <输出目录>/需求确认.md
+# 也可以只跑单入口（自动识别每个文件该过哪道门，输出一张汇总表；--strict 让 WARN 也非零退出）：
+python scripts/check.py <输出目录>
 ```
 
 - **闸门①、闸门③ 与闸门④ 都必须 0 ERROR 才算通过**（闸门② 查的是本技能自己的定义，改了 `SKILL.md`、`AGENTS.md`
@@ -270,19 +273,21 @@ python scripts/check_confirm.py <输出目录>/需求确认.md
 | `check_prompt.py` | **0 ERROR**（WARN 可接受，但要逐条说明） |
 | `python scripts/check_prompt.py --selftest` | 正例 0 ERROR、反例 ≥5 ERROR、`templates/提示词骨架.md` 也是 **0 ERROR 0 WARN**；120 个用例全过（5 个真实文件 + 115 个内置回归；改了脚本 / 示例 / 模板必须重跑） |
 | `check_skill.py <SKILL.md>` | **0 ERROR**（检查本技能自己的定义：name 与目录名一致、description 能在 500 字内被自动识别、正文写了分诊与默认档；改 `SKILL.md` 后必须重跑） |
-| `python scripts/check_skill.py --selftest` | 仓库里真实的 `SKILL.md` 0 ERROR、每个反例用例报出的 ERROR 码与预期一致；61 个用例全过（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑，只有两者都建不了的环境才 SKIP） |
+| `python scripts/check_skill.py --selftest` | 仓库里真实的 `SKILL.md` 0 ERROR、每个反例用例报出的 ERROR 码与预期一致；76 个用例全过（其中 2 个目录链接用例在 Linux 用符号链接、Windows 用 junction 真跑，只有两者都建不了的环境才 SKIP；含 12 条迭代证据用例与 1 条独立分发用例） |
 | `check_contract.py` | **0 ERROR**（跨段一致性：C1 引用了不存在的编号、C3 未确认没人接、C2/C4/C5 是 WARN、C6 是 ERROR；段落齐不齐归闸门① 管） |
-| `python scripts/check_contract.py --selftest` | 54 个用例 + 2 个 `--no-ignore` 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例全过 |
-| `python scripts/mutate_checks.py` | 把闸门源码改坏 78 处，每一处都必须让对应的 `--selftest` 变红；基线必须先是绿的。自测空跑过一次（踩坑记录 #29），这一步就是防它再空跑 |
+| `python scripts/check_contract.py --selftest` | 57 个用例 + 2 个 `--no-ignore` 用例 + 1 个行号用例 + 2 个范围说明用例 + 2 个跨闸门一致用例 + 1 个性能用例全过（65 PASS） |
+| `python scripts/mutate_checks.py` | 把闸门源码改坏 86 处，每一处都必须让对应的 `--selftest` 变红；基线必须先是绿的。自测空跑过一次（踩坑记录 #29），这一步就是防它再空跑 |
 | `check_confirm.py` | **0 ERROR**（过程记录：三态判定、五步证据链、问询模式、每题的方法来源与「落到哪一段」；D0~D10 是 ERROR，D11/D12 是 WARN。D5 是**黑名单启发式**：只能拦常见空话、不能穷举，证据行仍须人工复核） |
-| `python scripts/check_confirm.py --selftest` | 56 个用例 + 2 个 `--no-ignore` 用例 + 1 个模板负例全过（内置正例、每个 ERROR 码至少一个反例；改了模板 / 样例 / 脚本必须重跑） |
+| `python scripts/check_confirm.py --selftest` | 65 个用例 + 2 个 `--no-ignore` 用例 + 1 个模板负例全过（68 PASS；内置正例、每个 ERROR 码至少一个反例；改了模板 / 样例 / 脚本必须重跑） |
 | `python scripts/pick_methods.py --selftest` | 14 个检查全过（方法库 id 唯一、形态/缺口/风险映射、文本与 JSON 输出） |
+| `python scripts/check.py <文件或目录>` | **0 ERROR**（只对传给它的目标跑该跑的闸门；`--strict` 让 WARN 也非零退出、`--json` 给机器读、`--selftest` 26 个用例） |
 | `python scripts/check_prompt.py <文件> --no-ignore`、`python scripts/check_contract.py <文件> --no-ignore`、`python scripts/check_confirm.py <文件> --no-ignore` | 无视 `<!-- pf-ignore: W码 理由 -->` 豁免注释，把 WARN 全列出来（复核豁免得对不对时用） |
 
 脚本一律：**发现问题就非零退出并打印 `ERROR: ...` 行**，不要静默通过。
-以上几条在 `.github/workflows/ci.yml` 里跑（Python 3.9 / 3.12 两头都跑，四个闸门 + `pick_methods` 的自测都跑），
+以上几条在 `.github/workflows/ci.yml` 里跑（Python 3.9 / 3.12 两头都跑，六份自测：四个闸门 + 方法库 + 单入口 `check.py`），
 另加仓库级的检查：自家资产（`examples/例1`、`examples/例2`、`examples/例3`、`templates/提示词骨架.md`、`SKILL.md`、
-`examples/需求确认/例1-下载文件夹整理.需求确认.md`）必须过闸门；两份反例（闸门① 与闸门④ 各一份）与需求确认占位模板必须被拦下；
+`examples/需求确认/例1-下载文件夹整理.需求确认.md`、`examples/技能定义/evidence-images/`）必须过闸门；
+两份提示词/需求确认反例、`examples/技能定义/evidence-fake/` 与需求确认占位模板必须被拦下；
 仓库文本必须是 LF。
 
 ## 6. 参考文档

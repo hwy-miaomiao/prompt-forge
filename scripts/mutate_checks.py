@@ -389,7 +389,7 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "description 判定标记不再归一化（零宽「不接」假 E6）", "check_skill.py",
-        "    desc_probe = cp.normalize_invisible(desc)",
+        "    desc_probe = normalize_invisible(desc)",
         "    desc_probe = desc",
     ),
     # ---- 第 8 轮审计的 5 条修复各留一处变异 ----
@@ -490,7 +490,9 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "D3 一句理由随便写也放行", "check_confirm.py",
-        "            if _is_placeholder(reason) or len(reason) < 8:",
+        '            reason_substance = re.sub(r"[\\W_]+", "", reason)\n'
+        "            if _is_placeholder(reason) or len(reason) < 8 or len(reason_substance) < 4:",
+        '            reason_substance = re.sub(r"[\\W_]+", "", reason)\n'
         "            if False:",
     ),
     Mutation(
@@ -512,6 +514,52 @@ MUTATIONS: list[Mutation] = [
         "D12 needs-clarification 不写缺什么也放行", "check_confirm.py",
         '    if triage == "needs-clarification" and not NEEDS_REASON_RE.search(decide_text):',
         "    if False:",
+    ),
+    # —— 第 9 轮审计：N2 / 伪造证据 / 段号越界 / 理由只用符号，修掉的洞必须被自测钉住 ——
+    Mutation(
+        "纸张前置窗口又接受「见下/验收」引用语（第 9 轮 N2）", "check_contract.py",
+        "    return bool(match and not _PAPER_CONTEXT_STOP_RE.search(match.group(1)))",
+        "    return bool(match)",
+    ),
+    Mutation(
+        "证据填充词退回只剥行首（「还没查，先按默认」又放行）", "check_confirm.py",
+        "        if word in body:\n"
+        '            body = body.replace(word, "")',
+        "        if body.startswith(word):\n"
+        "            body = body[len(word):]",
+    ),
+    Mutation(
+        "D9 段号只查形状不查范围（第 99 段又放行）", "check_confirm.py",
+        "        if not 1 <= number <= 12:\n"
+        "            return False",
+        "        if not 1 <= number <= 99:\n"
+        "            return False",
+    ),
+    Mutation(
+        "D3 理由退回只数长度（8 个 emoji 也算一句理由）", "check_confirm.py",
+        "            if _is_placeholder(reason) or len(reason) < 8 or len(reason_substance) < 4:",
+        "            if _is_placeholder(reason) or len(reason) < 8:",
+    ),
+    # —— 第 9 轮拓展：迭代证据闸门（check_skill）与单入口 check.py ——
+    Mutation(
+        "迭代证据闸门整段关掉（声明 evidence 也不查）", "check_skill.py",
+        '    if "evidence" in fields:',
+        "    if False:",
+    ),
+    Mutation(
+        "图片魔数不验（文本改名成 .png 也算真图）", "check_skill.py",
+        "        info = _image_info(image_path.read_bytes())",
+        '        info = ("png", 1, 1)',
+    ),
+    Mutation(
+        "单入口退出码：有 ERROR 也返回 0", "check.py",
+        "    if errors:\n        return 1",
+        "    if False:\n        return 1",
+    ),
+    Mutation(
+        "单入口把需求确认文档当成普通提示词（正文特征不认）", "check.py",
+        "        if any(marker in text for marker in _CONFIRM_MARKERS):",
+        "        if False:",
     ),
 ]
 

@@ -76,6 +76,9 @@ EVIDENCE_NEGATION_RE = re.compile(
 )
 #: 「落到 prompt.md」必须能解析成段 / 需求 / 验收编号，否则「随便」也能过（独立验证 F2）。
 TRACE_RE = re.compile(r"第\s*\d+\s*段|§\s*\d+|R\d+|A\d+")
+#: 段号必须落在 1~12：`第 99 段` / `第 0 段` 解析得出来、但 prompt.md 根本没有那一段
+#: （第 9 轮审计：D9 只查形状不查范围，「第 99 段」静默绿灯）。
+_TRACE_SECTION_RE = re.compile(r"(?:第\s*(\d+)\s*段|§\s*(\d+))")
 #: 方法来源里的 M 编号形状；合法性还要对方法库（见 `_valid_method`）。
 METHOD_ID_RE = re.compile(r"M\d{2}")
 
@@ -253,46 +256,57 @@ def _valid_method(value: str) -> bool:
 
 
 def _valid_trace(value: str) -> bool:
-    """「落到 prompt.md」必须能解析：第 N 段 / §N / R# / A#（独立验证 F2）。"""
+    """「落到 prompt.md」必须能解析：第 N 段 / §N / R# / A#（独立验证 F2）。
+
+    第 9 轮审计：段号还要在 1~12 之间。旧版只看形状，`第 99 段` / `第 0 段` 都能过，
+    「追溯」就变成填个数字的游戏。
+    """
     text = _clean(value)
     if not text or _is_placeholder(text):
         return False
-    return bool(TRACE_RE.search(text))
+    if not TRACE_RE.search(text):
+        return False
+    for match in _TRACE_SECTION_RE.finditer(text):
+        number = int(match.group(1) or match.group(2))
+        if not 1 <= number <= 12:
+            return False
+    return True
 
 
 #: 证据正文去掉「否定 / 推迟 / 空话」后的残留：空 = 没写实质内容（第二轮 R2-F1，第三轮 R3-F1）。
 #: 不能只靠整段正则：`无（不适用）`、`没有证据，先按默认` 加字加括号就能绕过。
 #: 词表按长度从长到短排：`暂无结论` 必须先于 `暂无` 被剥，否则会漏下「结论」两个字冒充实质内容。
+#: 第 9 轮审计：旧版只剥**行首**的填充词，于是「还没查，先按默认」「回头再看，问题不大」
+#: 「我跑过命令了，结果都没问题」这类伪装证据静默过闸门。现在填充词出现在哪里都剥，
+#: 并要求残留的实质内容至少 4 个字符（见 `_evidence_ok`）。
 _EVIDENCE_FILLER_WORDS = tuple(sorted({
     "先按默认", "按默认", "默认", "暂无结论", "暂无数据", "暂无", "尚无结论", "尚无", "尚未",
     "尚不明确", "尚不清楚", "尚不", "不明确", "不清楚", "不确定", "不肯定", "不好说", "说不好",
     "说不上", "无法确定", "无法判断", "无法确认", "无法核实", "无可奉告", "没有结论", "没有数据",
-    "还没有结论", "没有实质内容", "无任何有效信息",
+    "还没有结论", "没有实质内容", "无任何有效信息", "问题不大", "都没问题", "没问题",
+    "确认过了", "确认过", "还没", "没查", "回头", "跑过", "结果", "已经",
     "没有", "不存在", "不适用", "不涉及", "不知道", "不明白", "不理解", "未定", "未知", "待定",
     "待补", "待确认", "待核实", "待观察", "待查", "再看看", "再看", "再定", "之后再", "进一步",
     "确认", "核实", "补充", "后续", "暂时", "目前", "现在", "当前", "看情况", "视情况", "再说",
     "大概率", "应该", "可能是", "也许是", "大概是", "估计", "猜测", "看起来", "听起来", "似乎",
     "好像", "恐怕", "说不定", "结论", "情况", "是", "无", "没", "未", "空", "暂", "先", "再", "等", "看",
+    "查", "我",
 }, key=lambda word: (-len(word), word)))
 
 
 def _evidence_substance(text: str) -> str:
-    """把证据正文剥到只剩「实质内容」：去括号补充、证据标记词、标点、开头否定/推迟词。
+    """把证据正文剥到只剩「实质内容」：去括号补充、证据标记词、标点、否定/推迟/空话词。
 
-    判 D5 时只要残留为空，就说明这段证据只是在说「没有 / 不适用 / 待补 / 按默认」，
-    哪怕加括号或逗号后半句也不该算证据。
+    判 D5 时只要残留为空（或过短），就说明这段证据只是在说「没有 / 不适用 / 待补 / 按默认」，
+    哪怕加括号、加逗号后半句、把填充词挪到句中，也不该算证据。
+    填充词按「任意位置」剥：`还没查，先按默认` 里的「还没」「先按默认」不在行首也要剥掉。
     """
     body = re.sub(r"[（(][^（）()]*[）)]", "", text)
     body = re.sub(r"(?:证据|依据|理由|原因|来源|为什么|实测|原话)", "", body)
     body = re.sub(r"[\s。．.;；,，、:：…!！?？\-—_/\\|（）()\[\]【】「」『』\"'']", "", body)
-    changed = True
-    while changed:
-        changed = False
-        for word in _EVIDENCE_FILLER_WORDS:
-            if body.startswith(word):
-                body = body[len(word):]
-                changed = True
-                break
+    for word in _EVIDENCE_FILLER_WORDS:
+        if word in body:
+            body = body.replace(word, "")
     return body
 
 
@@ -304,7 +318,10 @@ def _evidence_ok(content: str) -> bool:
     body = re.sub(r"^\s*(?:证据|理由|依据|原因|来源|为什么|实测|原话)\s*[:：]\s*", "", text)
     if len(re.sub(r"\s", "", body)) < 4:
         return False
-    if EVIDENCE_NEGATION_RE.match(body.strip()) or not _evidence_substance(body):
+    if EVIDENCE_NEGATION_RE.match(body.strip()):
+        return False
+    # 第 9 轮审计：残留实质内容 < 4 个字符的（「命令了」「已经过了」）也是空话。
+    if len(_evidence_substance(body)) < 4:
         return False
     return any(word in text for word in EVIDENCE_WORDS)
 
@@ -392,10 +409,13 @@ def check_confirm_file(
             findings.append(cp.Finding("ERROR", "D3", "第 0 节缺少「一句理由」一行"))
         else:
             reason = _clean(reason_row[0])
-            if _is_placeholder(reason) or len(reason) < 8:
+            # 第 9 轮审计：只数长度会放过 8 个 emoji / 8 个句号；这里还要求至少 4 个实字。
+            reason_substance = re.sub(r"[\W_]+", "", reason)
+            if _is_placeholder(reason) or len(reason) < 8 or len(reason_substance) < 4:
                 findings.append(cp.Finding(
                     "ERROR", "D3",
-                    f"一句理由太短（{len(reason)} 字）：至少说清交付物有没有、是不是任务级、缺的信息能不能自查到",
+                    f"一句理由太短或只有符号（{len(reason)} 字，有效字 {len(reason_substance)}）："
+                    "至少说清交付物有没有、是不是任务级、缺的信息能不能自查到",
                     reason_row[1],
                 ))
 
@@ -849,6 +869,25 @@ def selftest() -> int:
          lambda: sub(base, q3_line, q3_line + "\n"
                      "| Q4 | 界面颜色用什么？ | M10 九维非功能扫描 | 未确认：还没定 | 第 10 段假设 |"),
          {"D10"}, set(), ""),
+        # 第 9 轮审计：填充词挪到句中/句首的伪装证据、段号越界的追溯、只有符号的理由。
+        ("R9 证据写成「还没查，先按默认」",
+         lambda: sub(base, intake_line, "- intake：证据：还没查，先按默认"), {"D5"}, set(), ""),
+        ("R9 证据写成「回头再看，问题不大」",
+         lambda: sub(base, intake_line, "- intake：证据：回头再看，问题不大"), {"D5"}, set(), ""),
+        ("R9 证据写成「我跑过命令了，结果都没问题」",
+         lambda: sub(base, intake_line, "- intake：证据：我跑过命令了，结果都没问题"), {"D5"}, set(), ""),
+        ("R9 证据写成「已经确认过了」",
+         lambda: sub(base, intake_line, "- intake：证据：已经确认过了"), {"D5"}, set(), ""),
+        ("R9 追溯段号 99 越界",
+         lambda: sub(base, q2_line, q2_line.replace("R2 + A2", "第 99 段")), {"D9"}, set(), ""),
+        ("R9 追溯段号 0 越界",
+         lambda: sub(base, q2_line, q2_line.replace("R2 + A2", "第 0 段")), {"D9"}, set(), ""),
+        ("R9 追溯写第 12 段仍在范围内（别改出假红）",
+         lambda: sub(base, q2_line, q2_line.replace("R2 + A2", "第 12 段汇报格式")), set(), set(), ""),
+        ("R9 一句理由是 8 个 emoji",
+         lambda: sub(base, reason_row, "| 一句理由 | 🎉🎉🎉🎉🎉🎉🎉🎉 |"), {"D3"}, set(), ""),
+        ("R9 一句理由是 8 个句号",
+         lambda: sub(base, reason_row, "| 一句理由 | 。。。。。。。。 |"), {"D3"}, set(), ""),
         ("D11 超过 9 题", extra_questions, set(), {"D11"}, ""),
         ("D12 needs-clarification 没写还缺什么",
          lambda: sub(sub(base, triage_row, "| 分诊结论（阶段 -1） | 先问一句（needs-clarification） |"),

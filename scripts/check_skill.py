@@ -14,6 +14,12 @@
 prompt-forge 的家规拦下）。另外，正文引用了**同目录**文件（`AGENTS.md` / `references/` / 闸门脚本）
 却只拷了一个 `SKILL.md`，也在这里拦。
 
+第四项检查（第 9 轮新增，对应竞品调研 README §3.3 第①条「把看过/做过变成机器可验证」）：
+把「代理真的看过/做过」也钉成闸门。frontmatter 可选用 `evidence: 2 images`（可加 `min 32x32`）
+声明「迭代记录里至少有几张真图」；声明后，正文的「迭代记录 / 自检」章节里必须出现至少 2 个
+**真实存在**的图片相对路径（扩展名白名单 + 文件魔数 + 可选最小尺寸）。没声明的技能完全不查
+—— 别人的自足技能不该背 prompt-forge 的家规。
+
 三条实现口径（都被真实审计撞过，改代码时别丢）：
 1. frontmatter 按 YAML 的常见写法解析：折行/缩进续行要折叠、行内 `#` 注释要剥掉、
    **闭合标记 `---` 必须真的存在**（未闭合时宿主会整个忽略这个技能，闸门不能报"通过"）。
@@ -30,14 +36,12 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import check_prompt as cp  # noqa: E402  （同目录，故意复用闸门① 的字符串归一化口径）
 
 def _setup_stdout() -> None:
     """管道/重定向时强制 UTF-8（避免 Windows 上按 GBK 输出被读成乱码）；
@@ -52,6 +56,21 @@ def _setup_stdout() -> None:
 
 
 _setup_stdout()
+
+# ---------------------------------------------------------------- 字符串归一化
+#: 第 9 轮审计：旧版 `import check_prompt as cp` 只为了用它的 `normalize_invisible`，代价是本脚本
+#: 不能单独分发（宿主安装形态下 scripts/ 里未必有 check_prompt.py）。口径与闸门① 完全一致，
+#: 这里内联一份；`mutate_checks.py` 的变异仍指向同一个调用行。
+_INVISIBLE_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
+_FULLWIDTH_LETTER_TRANS = str.maketrans(
+    {0xFF21 + i: 0x41 + i for i in range(26)} | {0xFF41 + i: 0x61 + i for i in range(26)}
+)
+
+
+def normalize_invisible(text: str) -> str:
+    """去掉零宽字符、把 NBSP 归一成空格、全角字母转半角（与闸门① 同口径）。"""
+    return _INVISIBLE_RE.sub("", text.replace("\u00a0", " ")).translate(_FULLWIDTH_LETTER_TRANS)
+
 
 # ---------------------------------------------------------------- 规则表（权威）
 
@@ -492,6 +511,202 @@ def _sibling_prose(prose: str) -> str:
     return re.sub(r"(?<!\.)\.[/\\]", "", prose)
 
 
+# ---------------------------------------------------------------- 迭代证据（第 9 轮新增）
+#: 竞品调研 README §3.3 第①条：把「看过/做过」变成机器可验证。最便宜、零依赖的落点，是让技能
+#: 自己声明「迭代记录里有几张真图」，闸门去验证这些图**真实存在且真是图片**（不是文本里写个路径）。
+#: 不声明 → 完全不查；现有的自足技能（examples/技能定义/good-minimal）不受影响。
+EVIDENCE_SECTION_MARKERS = ("迭代记录", "迭代日志", "自检记录", "自检", "验证记录", "检查记录")
+EVIDENCE_DEFAULT_COUNT = 2
+EVIDENCE_MAX_COUNT = 20
+EVIDENCE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+EVIDENCE_EXTENSION_NOTE = "PNG / JPEG / WebP"
+#: `evidence:` 的取值：`images` / `2 images` / `截图 2 张`，可带 `min 32x32`。
+EVIDENCE_DECL_RE = re.compile(
+    r"^(?:(\d+)\s*)?(?:张|个)?\s*"
+    r"(?:images?|pics?|pictures?|screenshots?|shots?|截图|图片|照片|图)\s*"
+    r"(?:min(?:imum)?\s+(\d+)\s*[x×*]\s*(\d+))?$",
+    re.IGNORECASE,
+)
+#: Markdown 图片：`![说明](shots/1.png)`，也认 `![x](<带空格的路径.png>)`。
+EVIDENCE_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*<?([^)>\s]+)>?\s*\)")
+#: 反引号里的图片路径（很多人把截图路径写在行内代码里）。
+EVIDENCE_CODE_PATH_RE = re.compile(r"`([^`\n]+\.(?:png|jpe?g|webp))`", re.IGNORECASE)
+#: 纯文本裸路径：`shots/iter-1.png`、`迭代图/1.PNG`。
+EVIDENCE_BARE_PATH_RE = re.compile(
+    r"(?<![\w./\\:-])((?:[\w.\-]+[/\\])*[\w.\-]+\.(?:png|jpe?g|webp))\b",
+    re.IGNORECASE,
+)
+_SECTION_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+
+
+def _parse_evidence_decl(value: str) -> tuple[int, int, int] | None:
+    """`evidence:` 取值 → (张数, 最小宽, 最小高)；看不懂返回 None（调用方报 E8）。"""
+    match = EVIDENCE_DECL_RE.match(value.strip().strip("`'\""))
+    if not match:
+        return None
+    count = int(match.group(1)) if match.group(1) else EVIDENCE_DEFAULT_COUNT
+    if not 1 <= count <= EVIDENCE_MAX_COUNT:
+        return None
+    min_w = int(match.group(2)) if match.group(2) else 0
+    min_h = int(match.group(3)) if match.group(3) else 0
+    return count, min_w, min_h
+
+
+def _evidence_section(lines: list[str], fm_end: int) -> tuple[str, int] | None:
+    """找正文里的「迭代记录 / 自检」章节：返回 (章节正文, 正文起始 0-based 行号)。"""
+    for idx in range(fm_end, len(lines)):
+        match = _SECTION_HEADING_RE.match(lines[idx])
+        if not match:
+            continue
+        if not any(marker in match.group(2) for marker in EVIDENCE_SECTION_MARKERS):
+            continue
+        level = len(match.group(1))
+        end = len(lines)
+        for jdx in range(idx + 1, len(lines)):
+            other = _SECTION_HEADING_RE.match(lines[jdx])
+            if other and len(other.group(1)) <= level:
+                end = jdx
+                break
+        return "\n".join(lines[idx + 1:end]), idx + 1
+    return None
+
+
+def _evidence_refs(section: str) -> list[str]:
+    """章节里声称的图片相对路径（Markdown 图片 / 行内代码 / 纯文本），去重保序。"""
+    refs: list[str] = []
+    for match in EVIDENCE_MD_IMAGE_RE.finditer(section):
+        refs.append(match.group(1))
+    for match in EVIDENCE_CODE_PATH_RE.finditer(section):
+        refs.append(match.group(1))
+    rest = EVIDENCE_CODE_PATH_RE.sub("", EVIDENCE_MD_IMAGE_RE.sub("", section))
+    for match in EVIDENCE_BARE_PATH_RE.finditer(rest):
+        refs.append(match.group(1))
+    out: list[str] = []
+    seen: set[str] = set()
+    for ref in refs:
+        cleaned = ref.strip().strip("`<>\"'")
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            out.append(cleaned)
+    return out
+
+
+def _jpeg_size(data: bytes) -> tuple[int, int]:
+    """从 JPEG 的 SOF 段读宽高（闸门只验魔数，不做完整解码）。"""
+    idx = 2
+    while idx + 9 <= len(data):
+        if data[idx] != 0xFF:
+            idx += 1
+            continue
+        marker = data[idx + 1]
+        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+            idx += 2
+            continue
+        seg_len = int.from_bytes(data[idx + 2:idx + 4], "big")
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC) and seg_len >= 7:
+            height = int.from_bytes(data[idx + 5:idx + 7], "big")
+            width = int.from_bytes(data[idx + 7:idx + 9], "big")
+            return width, height
+        idx += 2 + seg_len
+    return 0, 0
+
+
+def _webp_size(data: bytes) -> tuple[int, int]:
+    """从 WebP 头读宽高：优先 VP8X 画布，退回 VP8 关键帧。"""
+    chunk = data[12:16]
+    if chunk == b"VP8X" and len(data) >= 30:
+        width = int.from_bytes(data[24:27], "little") + 1
+        height = int.from_bytes(data[27:30], "little") + 1
+        return width, height
+    if chunk == b"VP8 " and len(data) >= 30:
+        width = int.from_bytes(data[26:28], "little") & 0x3FFF
+        height = int.from_bytes(data[28:30], "little") & 0x3FFF
+        return width, height
+    return 0, 0
+
+
+def _image_info(data: bytes) -> tuple[str, int, int] | None:
+    """按文件魔数判断格式与像素尺寸（PNG / JPEG / WebP）；读不出来返回 None。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        width = int.from_bytes(data[16:20], "big")
+        height = int.from_bytes(data[20:24], "big")
+        return "png", width, height
+    if data.startswith(b"\xff\xd8\xff"):
+        width, height = _jpeg_size(data)
+        return "jpeg", width, height
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        width, height = _webp_size(data)
+        return "webp", width, height
+    return None
+
+
+def _evidence_line(lines: list[str], ref: str, section_start: int) -> int:
+    """报告行号：章节里第一次出现这个路径的行（1-based）；找不到退回章节首行。"""
+    needle = ref.replace("\\", "/")
+    for idx in range(max(section_start - 1, 0), len(lines)):
+        if needle in lines[idx].replace("\\", "/"):
+            return idx + 1
+    return section_start + 1
+
+
+def _check_evidence(path: Path, value: str, lines: list[str], fm_end: int,
+                    decl_line: int) -> list[Finding]:
+    """E8/E9：frontmatter 声明 `evidence:` 后，校验「迭代记录」里的图片真的存在、真的是图片。"""
+    decl = _parse_evidence_decl(value)
+    if decl is None:
+        return [Finding("ERROR", "E8",
+                        f"frontmatter 的 `evidence` 声明「{value}」看不懂：写成 `evidence: 2 images`"
+                        "（张数缺省 2，最大 20），需要最小尺寸就加 `min 32x32`；或者删掉这一行", decl_line)]
+    count, min_w, min_h = decl
+    section = _evidence_section(lines, fm_end)
+    if section is None:
+        return [Finding("ERROR", "E8",
+                        "frontmatter 声明了 `evidence`，但正文没有「迭代记录 / 自检」章节；"
+                        "把每轮实测截图与自检结论写进一个 `## 迭代记录` 段落，图片用相对路径引用"
+                        "（例如 `![第 1 轮](shots/iter-1.png)`）", decl_line)]
+    section_text, section_start = section
+    findings: list[Finding] = []
+    valid = 0
+    for ref in _evidence_refs(section_text):
+        line_no = _evidence_line(lines, ref, section_start)
+        if ref.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", ref):
+            findings.append(Finding("ERROR", "E9",
+                                    f"迭代证据里的图片路径必须是相对 SKILL.md 目录的相对路径：`{ref}`",
+                                    line_no))
+            continue
+        rel = Path(ref.replace("\\", "/"))
+        if rel.suffix.lower() not in EVIDENCE_EXTENSIONS:
+            findings.append(Finding("ERROR", "E9",
+                                    f"迭代证据里的图片格式不支持：`{ref}`（只认 {EVIDENCE_EXTENSION_NOTE}）",
+                                    line_no))
+            continue
+        image_path = path.parent / rel
+        if not image_path.is_file():
+            findings.append(Finding("ERROR", "E9",
+                                    f"迭代证据引用的图片不存在：`{ref}`（按 SKILL.md 所在目录解析；"
+                                    "文本里写个路径不算证据，要么补图、要么删掉）", line_no))
+            continue
+        info = _image_info(image_path.read_bytes())
+        if info is None:
+            findings.append(Finding("ERROR", "E9",
+                                    f"迭代证据里的文件不是真正的图片：`{ref}`（扩展名对但魔数不对，"
+                                    "改扩展名不算证据）", line_no))
+            continue
+        _, width, height = info
+        if min_w and min_h and (width < min_w or height < min_h):
+            findings.append(Finding("ERROR", "E9",
+                                    f"迭代证据里的图片尺寸不够：`{ref}` 是 {width}x{height}，"
+                                    f"声明要求至少 {min_w}x{min_h}", line_no))
+            continue
+        valid += 1
+    if valid < count:
+        findings.append(Finding("ERROR", "E8",
+                                f"迭代证据不足：声明至少 {count} 张可验证的图片，实际只有 {valid} 张"
+                                f"（要相对路径、真实存在、魔数是 {EVIDENCE_EXTENSION_NOTE}）；"
+                                "没真的跑过/看过就别声明 evidence", decl_line))
+    return findings
+
+
 def check_skill(path: Path) -> tuple[list[Finding], int]:
     """检查一个 SKILL.md。返回 (findings, 字符数)。"""
     findings: list[Finding] = []
@@ -535,7 +750,7 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
     # 复制来的，常混进零宽字符（U+200B/FEFF）或全角字母（`Ｄo NOT use`）。视觉上「不接」
     # 明明还在，逐字符比较却找不到 → 假 E6/E5，等于逼用户去改一个肉眼看不见的字符。
     # name 不归一：它是宿主侧登记用的标识符，必须逐字符一致（E2/E3 该红就红）。
-    desc_probe = cp.normalize_invisible(desc)
+    desc_probe = normalize_invisible(desc)
     if not name:
         findings.append(Finding("ERROR", "E1", "frontmatter 缺 `name`（宿主靠它登记这个技能）", 1))
     if not desc:
@@ -591,7 +806,7 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
     body_lines = lines[fm_end:] if fm_end else []
     # 正文的声明类检查同样按归一化文字匹配（第 7 轮审计 R7-PF-G2-01）：零宽字符插在
     # 「不接」「分诊」这类标记中间时语义没变，只有逐字符比较会翻车。
-    body = cp.normalize_invisible("\n".join(body_lines))
+    body = normalize_invisible("\n".join(body_lines))
     # 声明类的检查只看正文本身，不看正文里引用的样例代码块（围栏 + 缩进两类都剥）。
     prose = _strip_indented_code(strip_fences(body))
     body_start = fm_end + 1  # 1-based 行号，正文第一行（fm_end 已经是闭合 `---` 的行号）
@@ -636,6 +851,12 @@ def check_skill(path: Path) -> tuple[list[Finding], int]:
                                 + "，但它不在同目录里（只统计同目录的相对引用；"
                                   "`../` 与绝对路径不算，把 SKILL.md 单独拷走会指向不存在的东西）",
                                 marker_line(lines, list(missing), fm_end, body_start)))
+
+    # ---- 迭代证据：frontmatter 可选 `evidence:` 声明后，机器验证「真的看过/做过」
+    #      （第 9 轮新增；竞品调研 README §3.3 第①条。未声明就完全不查，自足技能不受影响）
+    if "evidence" in fields:
+        findings.extend(_check_evidence(path, fields["evidence"], lines, fm_end,
+                                        key_lines.get("evidence", 1)))
 
     return findings, len(text)
 
@@ -968,6 +1189,8 @@ def selftest() -> int:
         "no-trigger": ({"E5"}, {"W2"}),             # 描述里没有"何时该用"，且不是祈使句
         "no-boundary": ({"E6"}, set()),             # 描述里没有"何时不该用"
         "boundary-after-500": ({"E6"}, {"W1"}),     # 边界写在第 500 字之后 = 宿主看不到
+        "evidence-images": (set(), set()),          # 声明 evidence，迭代记录里两张真图（第 9 轮）
+        "evidence-fake": ({"E8", "E9"}, set()),     # 声明 evidence，图片路径却是编的（反例，必须被拦）
     }
     examples_root = Path(__file__).resolve().parent.parent / "examples" / "技能定义"
     if not examples_root.is_dir():
@@ -1228,6 +1451,120 @@ def selftest() -> int:
     #    frontmatter 也是 linked-name：不该报 E3（旧版 resolve() 会误报）。
     link_case("安装目录与真实目录名不同（不解析链接）", "real-skill", "installed-as", "real-skill", True)
     link_case("链接名就是安装名时不能假报 E3", "target-dir", "linked-name", "linked-name", False)
+
+    # 8) 迭代证据闸门（第 9 轮新增，竞品调研 README §3.3 第①条）：
+    #    frontmatter 声明 `evidence:` 后，正文「迭代记录 / 自检」里的图片必须真实存在且真是图片；
+    #    没声明的技能完全不受影响。
+    def png_bytes(width: int = 4, height: int = 4) -> bytes:
+        """生成一张合法的纯色 PNG（自测夹具；不引入第三方依赖）。"""
+        def chunk(tag: bytes, payload: bytes) -> bytes:
+            return (struct.pack(">I", len(payload)) + tag + payload
+                    + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF))
+        raw = b"".join(b"\x00" + b"\x00\x00\x00" * width for _ in range(height))
+        return (b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw))
+                + chunk(b"IEND", b""))
+
+    def jpeg_bytes(width: int = 4, height: int = 4) -> bytes:
+        """最小 JPEG 头（SOI/APP0/SOF0/EOI）：闸门只验魔数与 SOF 尺寸，不解码像素。"""
+        app0 = (b"\xff\xe0" + struct.pack(">H", 16)
+                + b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+        sof = (b"\xff\xc0" + struct.pack(">H", 11) + b"\x08"
+               + struct.pack(">HH", height, width) + b"\x01\x01\x11\x00")
+        return b"\xff\xd8" + app0 + sof + b"\xff\xd9"
+
+    def webp_bytes(width: int = 4, height: int = 4) -> bytes:
+        """最小 WebP（RIFF/WEBP + VP8X 画布头）。"""
+        payload = b"\x00\x00\x00\x00" + (width - 1).to_bytes(3, "little") + (height - 1).to_bytes(3, "little")
+        chunk = b"VP8X" + struct.pack("<I", len(payload)) + payload
+        body = b"WEBP" + chunk
+        return b"RIFF" + struct.pack("<I", len(body)) + body
+
+    def evidence_skill(decl: str | None, section_text: str,
+                       files: dict[str, bytes] | None = None) -> list[Finding]:
+        """写一份带/不带 evidence 声明的临时技能，返回 findings。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "evidence-skill"
+            skill_dir.mkdir()
+            for rel_name, payload in (files or {}).items():
+                target = skill_dir / rel_name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+            header = ("---\nname: evidence-skill\n"
+                      "description: 使用本技能：当用户要整理文件时按类型归类。不接：与文件整理无关的任务。\n")
+            if decl is not None:
+                header += f"evidence: {decl}\n"
+            header += "---\n\n# evidence\n\n"
+            write_text_lf(skill_dir / "SKILL.md", header + section_text + "\n")
+            findings, _ = check_skill(skill_dir / "SKILL.md")
+        return findings
+
+    def evidence_case(label: str, decl: str | None, section_text: str,
+                      files: dict[str, bytes], want_codes: set[str]) -> None:
+        nonlocal failed
+        findings = evidence_skill(decl, section_text, files)
+        codes = {f.code for f in findings if f.level == "ERROR"}
+        ok = codes == want_codes
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] {label}: ERROR 码 {sorted(codes)}（期望 {sorted(want_codes)}）")
+        if not ok:
+            failed += 1
+            for f in findings:
+                print("      " + f.render())
+
+    good_evidence = ("## 迭代记录\n\n"
+                     "第 1 轮：默认参数跑出来偏暗。\n\n![第 1 轮](shots/iter-1.png)\n\n"
+                     "第 2 轮：提亮后达到预期。\n\n![第 2 轮](shots/iter-2.png)\n")
+    real_pngs = {"shots/iter-1.png": png_bytes(), "shots/iter-2.png": png_bytes()}
+    evidence_case("声明 evidence 且两张真图存在（正例）", "2 images", good_evidence, real_pngs, set())
+    evidence_case("JPEG 与 WebP 也认（扩展名白名单 + 各格式魔数）", "2 images",
+                  "## 自检\n\n`shots/a.jpg` 与 `shots/b.webp`\n",
+                  {"shots/a.jpg": jpeg_bytes(), "shots/b.webp": webp_bytes()}, set())
+    evidence_case("声明 2 张但迭代记录只写了 1 张真图", "2 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/iter-1.png)\n",
+                  {"shots/iter-1.png": png_bytes()}, {"E8"})
+    evidence_case("声明 2 张、写了 2 个路径但第 2 张不存在", "2 images", good_evidence,
+                  {"shots/iter-1.png": png_bytes()}, {"E8", "E9"})
+    evidence_case("图片路径指向不存在的文件（伪造证据）", "2 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/iter-1.png)\n![第 2 轮](shots/iter-2.png)\n",
+                  {"shots/iter-1.png": png_bytes()}, {"E8", "E9"})
+    evidence_case("扩展名对但魔数不对（文本改名成 .png）", "2 images",
+                  "## 迭代记录\n\n![第 1 轮](shots/iter-1.png)\n![第 2 轮](shots/iter-2.png)\n",
+                  {"shots/iter-1.png": b"not an image", "shots/iter-2.png": b"not an image"},
+                  {"E8", "E9"})
+    evidence_case("没有「迭代记录 / 自检」章节", "2 images", "只写了正文，没有迭代记录。\n", {}, {"E8"})
+    evidence_case("声明了 evidence 但正文一张图都没写", "2 images", "## 迭代记录\n\n跑过了，没问题。\n", {}, {"E8"})
+    evidence_case("声明 min 32x32 但图片只有 4x4", "2 images min 32x32", good_evidence, real_pngs,
+                  {"E8", "E9"})
+    evidence_case("evidence 声明看不懂（写成一句话）", "请给两张图", good_evidence, real_pngs, {"E8"})
+    evidence_case("未声明 evidence 时完全不查（伪造路径也不报）", None,
+                  "## 迭代记录\n\n![随便](shots/not-there.png)\n", {}, set())
+    findings = evidence_skill("2 images", good_evidence, real_pngs)
+    lines = [f.line for f in findings]
+    ok = not findings and not lines
+    print(f"{'PASS' if ok else 'FAIL'}  [闸门] 声明 evidence 的合规技能 0 ERROR（行号为空）")
+    if not ok:
+        failed += 1
+        for f in findings:
+            print("      " + f.render())
+
+    # 9) 第 9 轮审计：内联归一化后，本脚本不再依赖同目录的 check_prompt.py（旧版 `import check_prompt`
+    #    只在 sys.path 塞了 scripts/ 时可用，单独拷一个文件就 ImportError）。单独拷走必须能跑。
+    with tempfile.TemporaryDirectory() as tmp:
+        lone = Path(tmp) / "check_skill.py"
+        lone.write_bytes(Path(__file__).resolve().read_bytes())
+        skill = Path(__file__).resolve().parent.parent / "SKILL.md"
+        proc = subprocess.run(
+            [sys.executable, "-X", "utf8", "-B", str(lone), str(skill)],
+            cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+        )
+        out = proc.stdout.decode("utf-8", "replace")
+        ok = proc.returncode == 0 and "0 ERROR" in out
+        print(f"{'PASS' if ok else 'FAIL'}  [闸门] 单独分发 check_skill.py（同目录没有 check_prompt.py）仍能跑: "
+              f"rc={proc.returncode}")
+        if not ok:
+            failed += 1
+            print("      " + out.strip().replace("\n", "\n      "))
 
     print(f"\n自测结果：{'全部通过' if not failed else f'{failed} 个用例不通过'}")
     return 1 if failed else 0

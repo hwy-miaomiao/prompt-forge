@@ -58,8 +58,11 @@ audience / memory / success criteria / examples 这九个维度里，哪些已�
    交付时把长提示词**全文**放进回复里，而不是只说「已写入文件」。
    改动过本文件、`AGENTS.md` 或 `references/` 的话，另外跑 `python scripts/check_skill.py SKILL.md`
    —— 它查的是这个技能自己还能不能被宿主自动识别（frontmatter 写错会让技能静默失效）；
-   改动过任何闸门脚本（`scripts/*.py`）的话，五份 `--selftest`（四个闸门 + `pick_methods.py`）
+   如果本技能在 frontmatter 声明了 `evidence:`，它还会验正文「迭代记录」里的图片路径是不是真实存在。
+   改动过任何闸门脚本（`scripts/*.py`）的话，六份 `--selftest`（四个闸门 + `pick_methods.py` + `check.py`）
    与 `python scripts/mutate_checks.py` 都要重跑。
+   只想跑该跑的闸门时，用单入口：`python scripts/check.py <输出目录>`（自动识别目标；
+   `--strict` 让 WARN 也非零退出，`--json` 给机器读）。
 
 > 本技能的自动触发是**模型侧的语义匹配**（宿主把 name + description 交给模型，模型自己判断该不该用），
 > 官方口径是"必要非充分"：描述匹配也可能不触发。所以宿主没自动接住时，用户直接说
