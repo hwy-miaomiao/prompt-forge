@@ -30,6 +30,15 @@
   （`🎉🎉实测🎉🎉`）与常见英文空话（`I checked, all good.`）仍静默过。现在与 D3 同口径按 `[\W_]+` 剥，
   并补常见英文/中文空话词表。
 
+### 修复（CI 跨平台，2026-10-22 晚）
+
+- **变异检验 [89] 在 Linux CI 上假绿（本机 Windows 全绿掩盖了它）**：该变异只把
+  `_is_link_entry` 的 Windows reparse point 回退分支改成 `return False`，而 POSIX 上符号链接
+  目录项本来就被 `entry.is_dir(follow_symlinks=False)` 排除 —— 守卫是死代码，变异后自测仍绿。
+  现在换成「目录扫描跟进链接 → 循环目录无限递归」的行为回归（多行 old/new 替换），Windows
+  junction 与 POSIX 符号链接环都能抓到；变异总数仍 96。Linux（Ubuntu 24.04 / 3.12.3 + 3.9.25）
+  实测 96/96 全抓。
+
 ### 确认有效的既有修复
 
 - N2（闸门③ C1 纸张窗口）、D9（段号 1~12）、D5（本轮 5 类伪造话术）、D3（有效字 ≥4）、闸门② 独立分发：

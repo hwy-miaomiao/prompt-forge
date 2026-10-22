@@ -573,9 +573,13 @@ MUTATIONS: list[Mutation] = [
         '        "exit_code": exit_code(errors, warns, strict),',
     ),
     Mutation(
-        "目录扫描又跟进 junction / 符号链接（循环目录会重复出目标）", "check.py",
-        '    return bool(getattr(stat_result, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)',
-        "    return False",
+        "目录扫描又跟进 junction / 符号链接（循环目录会无限递归）", "check.py",
+        "                if entry.is_dir(follow_symlinks=False):\n"
+        "                    if entry.name in noise or _is_link_entry(entry):\n"
+        "                        continue\n",
+        "                if entry.is_dir():\n"
+        "                    if entry.name in noise:\n"
+        "                        continue\n",
     ),
     Mutation(
         "证据图片路径又允许 ../ 跳出去（目录外真图也算证据）", "check_skill.py",
